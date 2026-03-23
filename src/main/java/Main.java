@@ -1,6 +1,7 @@
 import com.zsmartsystems.zigbee.*;
 import com.zsmartsystems.zigbee.app.ZigBeeNetworkExtension;
 import com.zsmartsystems.zigbee.app.basic.ZigBeeBasicServerExtension;
+import com.zsmartsystems.zigbee.app.discovery.ZigBeeNodeServiceDiscoverer;
 import com.zsmartsystems.zigbee.database.ZigBeeNetworkDataStore;
 import com.zsmartsystems.zigbee.database.ZigBeeNodeDao;
 import com.zsmartsystems.zigbee.dongle.ember.EmberNcp;
@@ -29,6 +30,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+import packet.UBabelPacket;
 
 public class Main {
 
@@ -38,7 +42,8 @@ public class Main {
 
     private static final String SERIAL_PORT = "/dev/tty.usbserial-2130";
     private static final int SERIAL_BAUD = 115200;
-    private static final int ZIGBEE_CHANNEL = 13; // ZigBeeChannel.CHANNEL_13
+    private static final ZigBeeChannel ZIGBEE_CHANNEL =
+        ZigBeeChannel.CHANNEL_13;
     private static final int ZIGBEE_PAN_ID = 0xE5F2;
     private static final String ZIGBEE_EPAN_ID = "001122334455667788";
 
@@ -88,7 +93,7 @@ public class Main {
     // Per-device state keyed by IEEE address (persistent across network address
     // changes)
     private static final Map<IeeeAddress, DeviceState> deviceStates =
-        new HashMap<>();
+        new ConcurrentHashMap<>();
 
     // IEEE address of the coordinator dongle, set once after initialize()
     private static IeeeAddress coordinatorIeee;
@@ -160,11 +165,36 @@ public class Main {
             return;
         }
 
+        ZigBeeNode coordNode = manager.getNode(coordinatorIeee);
+        if (coordNode != null) {
+            registerCoordinatorEndpoint(coordNode);
+        }
+
         // Open the network indefinitely so end devices can join or rejoin.
         // Reduce or remove permitJoin duration in production.
         manager.permitJoin(254);
         System.out.println(
             "Network open for joining. Listening for packets...");
+        Thread senderThread = new Thread(() -> {
+            int i = 0;
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    for (IeeeAddress ieee :
+                         new ArrayList<>(deviceStates.keySet())) {
+                        UBabelPacket pkt =
+                            new UBabelPacket(i, i * 2, "pingPONGpingPONGpingPONGpingPONG");
+                        sendToDevice(manager, ieee, pkt);
+                        System.out.println("packet: " + pkt);
+                        i++;
+                    }
+                    Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        senderThread.setDaemon(true);
+        senderThread.start();
         Thread.currentThread().join();
     }
 
@@ -213,7 +243,7 @@ public class Main {
      * cluster with the manager so the stack accepts inbound frames for it.
      */
     private static void configureNetwork(ZigBeeNetworkManager manager) {
-        manager.setZigBeeChannel(ZigBeeChannel.CHANNEL_13);
+        manager.setZigBeeChannel(ZIGBEE_CHANNEL);
         manager.setZigBeePanId(ZIGBEE_PAN_ID);
         manager.setZigBeeExtendedPanId(new ExtendedPanId(ZIGBEE_EPAN_ID));
         manager.setZigBeeNetworkKey(KEY_NETWORK);
@@ -253,8 +283,12 @@ public class Main {
                                   networkAddress, ieeeAddress);
                 if (status == ZigBeeNodeStatus.UNSECURED_JOIN) {
                     ZigBeeNode node = new ZigBeeNode(manager, ieeeAddress);
+
                     node.setNetworkAddress(networkAddress);
                     manager.updateNode(node);
+                    ZigBeeNodeServiceDiscoverer discoverer =
+                        new ZigBeeNodeServiceDiscoverer(manager, node);
+                    discoverer.startDiscovery();
                 }
             }
         });
@@ -262,9 +296,9 @@ public class Main {
         manager.addNetworkNodeListener(new ZigBeeNetworkNodeListener() {
             @Override
             public void nodeAdded(ZigBeeNode node) {
-                System.out.println("Node added: " + node.getIeeeAddress());
+                System.out.println("\n\nNode added: " + node.getIeeeAddress());
                 if (node.getIeeeAddress().equals(coordinatorIeee)) {
-                    registerCoordinatorEndpoint(node);
+                    // registerCoordinatorEndpoint(node);
                 } else {
                     registerEndDeviceEndpoint(node);
                 }
@@ -272,14 +306,10 @@ public class Main {
 
             @Override
             public void nodeUpdated(ZigBeeNode node) {
-                // Guard: only act on end device nodes that have been fully set
-                // up
-                if (!deviceStates.containsKey(node.getIeeeAddress()) &&
-                    node.getEndpoint(UBABEL_ED_ENDPOINT) != null) {
-                    System.out.println(
-                        "Node updated (already has ED endpoint): " +
-                        node.getIeeeAddress());
-                }
+                System.out.println(
+                    "\n\nNode updated: " + node.getIeeeAddress() +
+                    " endpoints=" + node.getEndpoints() +
+                    " ep10=" + node.getEndpoint(UBABEL_ED_ENDPOINT) + "\n\n");
             }
 
             @Override
@@ -303,18 +333,41 @@ public class Main {
         });
     }
 
+    private static void sendToDevice(ZigBeeNetworkManager manager,
+                                     IeeeAddress ieee, UBabelPacket pkt) {
+        ZigBeeNode coordNode = manager.getNode(coordinatorIeee);
+        ZigBeeNode destNode = manager.getNode(ieee);
+        System.out.printf(
+            "\n\n\n AFTER GETTING NODES Sending to %s: %s%n\n\n\n", ieee, pkt);
+        if (coordNode == null || destNode == null)
+            return;
+
+        ZigBeeEndpoint srcEp = coordNode.getEndpoint(UBABEL_C_ENDPOINT);
+        ZigBeeEndpoint dstEp = destNode.getEndpoint(UBABEL_ED_ENDPOINT);
+        System.out.printf("\n\n\n AFTER GETTING ENDPOINTS\n");
+        System.out.printf("srcEp=%s dstEp=%s%n\n\n\n", srcEp, dstEp);
+        if (srcEp == null || dstEp == null)
+            return;
+
+        // ZclCluster outCluster = srcEp.getOutputCluster(UBABEL_CLUSTER_ID);
+        // System.out.printf("\n\n\n AFTER GETTING OUT CLUSTER\n\n\n");
+        // if (outCluster == null)
+        // return;
+        ZclCluster destCluster = dstEp.getInputCluster(UBABEL_CLUSTER_ID);
+        System.out.printf("\n\n\n AFTER GETTING DEST CLUSTER\n\n\n");
+        if (destCluster == null)
+            return;
+        System.out.printf("Sending to %s: %s%n", ieee, pkt);
+        // Future<CommandResult> result = outCluster.writeAttribute(
+        Future<CommandResult> result = destCluster.writeAttribute(
+            UBABEL_ATTR_DATA_ID, ZclDataType.OCTET_STRING, pkt.toByteArray());
+        System.out.printf("Write submitted, future: %s%n", result);
+    }
+
     // -------------------------------------------------------------------------
     // Endpoint registration
     // -------------------------------------------------------------------------
 
-    /**
-     * Registers endpoint 1 on the coordinator node with the custom cluster.
-     * Attributes are declared as local/writable so the stack accepts incoming
-     * Write Attribute commands without returning UNSUPPORTED_ATTRIBUTE.
-     *
-     * Note: endpoint descriptors are normally populated via ZDO discovery.
-     * This manual registration is a workaround until ZDO is fixed.
-     */
     private static void registerCoordinatorEndpoint(ZigBeeNode node) {
         if (node.getEndpoint(UBABEL_C_ENDPOINT) != null)
             return;
@@ -323,35 +376,33 @@ public class Main {
         ep.setProfileId(HA_PROFILE_ID);
         ep.setDeviceId(0x0000);
 
-        ZclCluster cluster = new ZclCluster(ep, UBABEL_CLUSTER_ID, "uBabel") {};
-        cluster.addLocalAttributes(ubabelAttributes(cluster));
-        ep.addInputCluster(cluster);
-        ep.addOutputCluster(cluster);
+        ZclCluster inCluster =
+            new ZclCluster(ep, UBABEL_CLUSTER_ID, "uBabel") {};
+        inCluster.addLocalAttributes(ubabelAttributes(inCluster));
+        ep.addInputCluster(inCluster);
+
+        ZclCluster outCluster =
+            new ZclCluster(ep, UBABEL_CLUSTER_ID, "uBabel") {};
+        outCluster.addAttributes(ubabelAttributes(outCluster));
+        ep.addOutputCluster(outCluster);
+
         node.addEndpoint(ep);
 
-        System.out.println("Coordinator endpoint registered: " +
-                           node.getIeeeAddress());
+        System.out.println("\n\n\nCoordinator endpoint registered: " +
+                           node.getIeeeAddress() + "\n\n\n");
     }
 
-    /**
-     * Registers endpoint 10 on an end device node, mirroring the descriptor
-     * declared in the ESP firmware (zigbee.h / zb_end_device.c).
-     *
-     * Note: same workaround as above — should be replaced by ZDO discovery.
-     */
     private static void registerEndDeviceEndpoint(ZigBeeNode node) {
-        if (node.getEndpoint(UBABEL_ED_ENDPOINT) != null)
+        ZigBeeEndpoint ep = node.getEndpoint(UBABEL_ED_ENDPOINT);
+        if (ep == null)
             return;
-
-        ZigBeeEndpoint ep = new ZigBeeEndpoint(node, UBABEL_ED_ENDPOINT);
-        ep.setProfileId(HA_PROFILE_ID);
-        ep.setDeviceId(ESP_HA_CUSTOM_DEVICE_ID);
-
-        ZclCluster cluster = new ZclCluster(ep, UBABEL_CLUSTER_ID, "uBabel") {};
-        cluster.addAttributes(ubabelAttributes(cluster));
-        ep.addInputCluster(cluster);
-        ep.addOutputCluster(cluster);
-        node.addEndpoint(ep);
+        ZclCluster cluster = ep.getOutputCluster(UBABEL_CLUSTER_ID);
+        if (cluster == null)
+            return;
+        if (deviceStates.containsKey(node.getIeeeAddress()))
+            return;
+        cluster.addLocalAttributes(ubabelAttributes(cluster));
+        deviceStates.put(node.getIeeeAddress(), new DeviceState());
 
         System.out.println("End device endpoint registered: " +
                            node.getIeeeAddress());
@@ -395,8 +446,7 @@ public class Main {
         for (WriteAttributeRecord record : cmd.getRecords()) {
             switch (record.getAttributeIdentifier()) {
             case UBABEL_ATTR_DATA_ID -> {
-                byte[] raw = ((ByteArray)record.getAttributeValue()).get();
-                parseUbabelPacket(raw, ieee);
+                parseUbabelPacket((ByteArray)record.getAttributeValue(), ieee);
             }
             case UBABEL_ATTR_HEARTBEAT_ID -> {
                 int counter = ((Number)record.getAttributeValue()).intValue();
@@ -410,40 +460,19 @@ public class Main {
         }
     }
 
-    /**
-     * Parses a raw ubabel_zb_packet_t byte array and updates per-device state.
-     *
-     * Wire format (little-endian, no length prefix — ByteArray strips it):
-     * [0..1] id uint16
-     * [2..3] val uint16
-     * [4] payload_len uint8
-     * [5..N] payload UTF-8 string
-     */
-    private static void parseUbabelPacket(byte[] raw, IeeeAddress ieee) {
-        if (raw == null || raw.length < 5)
+    private static void parseUbabelPacket(ByteArray bytes, IeeeAddress ieee) {
+        if (bytes == null || bytes.size() < 5)
             return;
 
-        int id = (raw[0] & 0xFF) | ((raw[1] & 0xFF) << 8);
-        int val = (raw[2] & 0xFF) | ((raw[3] & 0xFF) << 8);
-        int payloadLen = raw[4] & 0xFF;
-
-        if (raw.length < 5 + payloadLen) {
-            System.err.printf(
-                "Packet from %s: truncated (len=%d, expected=%d)%n", ieee,
-                raw.length, 5 + payloadLen);
-            return;
-        }
-
-        String payload = new String(raw, 5, payloadLen, StandardCharsets.UTF_8);
+        UBabelPacket pkt = UBabelPacket.fromByteArray(bytes);
 
         DeviceState state =
             deviceStates.computeIfAbsent(ieee, k -> new DeviceState());
-        state.lastId = id;
-        state.lastVal = val;
-        state.lastPayload = payload;
+        state.lastId = pkt.id;
+        state.lastVal = pkt.val;
+        state.lastPayload = pkt.payload;
 
-        System.out.printf("Packet from %s: id=%d val=%d payload='%s'%n", ieee,
-                          id, val, payload);
+        System.out.printf("Packet from %s: %s\n", ieee, pkt);
     }
 
     // -------------------------------------------------------------------------
@@ -472,14 +501,16 @@ public class Main {
     private static class DeviceState {
         int lastId;
         int lastVal;
-        String lastPayload;
+        byte[] lastPayload;
         int heartbeatCounter;
 
         @Override
         public String toString() {
+            String payload_str =
+                new String(lastPayload, StandardCharsets.UTF_8);
             return String.format(
                 "DeviceState[id=%d, val=%d, heartbeat=%d, payload='%s']",
-                lastId, lastVal, heartbeatCounter, lastPayload);
+                lastId, lastVal, heartbeatCounter, payload_str);
         }
     }
 }
