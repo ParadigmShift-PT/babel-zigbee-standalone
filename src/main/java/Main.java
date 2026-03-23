@@ -251,12 +251,10 @@ public class Main {
                                            IeeeAddress ieeeAddress) {
                 System.out.printf("Announce: %s addr=0x%04X ieee=%s%n", status,
                                   networkAddress, ieeeAddress);
-                if (status == ZigBeeNodeStatus.UNSECURED_JOIN ||
-                    status == ZigBeeNodeStatus.SECURED_REJOIN) {
+                if (status == ZigBeeNodeStatus.UNSECURED_JOIN) {
                     ZigBeeNode node = new ZigBeeNode(manager, ieeeAddress);
                     node.setNetworkAddress(networkAddress);
                     manager.updateNode(node);
-                    manager.rediscoverNode(ieeeAddress);
                 }
             }
         });
