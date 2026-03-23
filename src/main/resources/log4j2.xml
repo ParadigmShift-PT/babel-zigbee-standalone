@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Configuration status="INFO">
+	<Appenders>
+		<Console name="console" target="SYSTEM_OUT">
+			<PatternLayout
+				pattern="%d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n" />
+		</Console>
+		<File name="filelog" fileName="${hostName}-general.log" immediateFlush="false"
+			append="false">
+			<PatternLayout
+				pattern="%d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n" />
+		</File>
+		<File name="msglog" fileName="${hostName}-message.log" immediateFlush="false"
+			append="false">
+			<PatternLayout
+				pattern="%d{UNIX_MILLIS} %msg%n" />
+		</File>
+		<File name="antientrophy" fileName="${hostName}-antientrophy.log" immediateFlush="false"
+			append="false">
+			<PatternLayout
+				pattern="%d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n"/>
+		</File>
+		<!--
+		<File name="channels" fileName="${hostName}-channels-trace.log" immediateFlush="false"
+			append="false">
+			<PatternLayout
+				pattern="%d{yyyy-MM-dd HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n"/>
+		</File>
+		-->
+	</Appenders>
+
+	<Loggers>
+		<Logger name="tardis.app" level="info" additivity="true">
+			<AppenderRef ref="msglog" />
+		</Logger> 
+		<Logger name="pt.unl.fct.di.novasys.babel.protocols.antientropy" level="info" additivity="true">
+			<AppenderRef ref="antientrophy" />
+		</Logger>
+		<Logger
+			name="pt.unl.fct.di.novasys.babel.utils.membership.monitor"
+			level="info" additivity="false">
+			<AppenderRef ref="console" />
+		</Logger>
+		<Logger
+                        name="pt.unl.fct.di.novasys.babel.core.protocols.discovery"
+                        level="error" additivity="false">
+                        <AppenderRef ref="console" />
+                </Logger>
+		<!--
+		<Logger name="pt.unl.fct.di.novasys.channel" level="trace" additivity="false">
+			<AppenderRef ref="channels" />
+		</Logge>
+		-->
+		<Logger
+			name="pt.unl.fct.di.novasys.babel.protocols" level="debug"
+			additivity="false">
+			<AppenderRef ref="console" />
+		</Logger>
+		<Logger
+			name="pt.unl.fct.di.novasys.babel.protocols.hyparview" level="info"
+			additivity="false">
+			<AppenderRef ref="console" />
+		</Logger>
+		<Logger
+			name="pt.unl.fct.di.novasys.babel.core" level="error"
+			additivity="false">
+			<AppenderRef ref="console" />
+		</Logger>
+		<Root level="info">
+			<AppenderRef ref="console" />
+			<AppenderRef ref="filelog" />
+		</Root>
+	</Loggers>
+</Configuration>
