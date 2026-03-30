@@ -7,6 +7,7 @@ import com.zsmartsystems.zigbee.database.ZigBeeNodeDao;
 import com.zsmartsystems.zigbee.dongle.ember.EmberNcp;
 import com.zsmartsystems.zigbee.dongle.ember.ZigBeeDongleEzsp;
 import com.zsmartsystems.zigbee.dongle.ember.ezsp.structure.EmberNetworkStatus;
+import com.zsmartsystems.zigbee.dongle.ember.ezsp.structure.EzspConfigId;
 import com.zsmartsystems.zigbee.dongle.ember.ezsp.structure.EzspDecisionId;
 import com.zsmartsystems.zigbee.dongle.ember.ezsp.structure.EzspPolicyId;
 import com.zsmartsystems.zigbee.security.ZigBeeKey;
@@ -40,7 +41,7 @@ public class Main {
     // Network configuration
     // -------------------------------------------------------------------------
 
-    private static final String SERIAL_PORT = "/dev/tty.usbserial-2130";
+    private static final String SERIAL_PORT = "/dev/tty.usbserial-210";
     private static final int SERIAL_BAUD = 115200;
     private static final ZigBeeChannel ZIGBEE_CHANNEL =
         ZigBeeChannel.CHANNEL_13;
@@ -175,16 +176,24 @@ public class Main {
         manager.permitJoin(254);
         System.out.println(
             "Network open for joining. Listening for packets...");
+
         Thread senderThread = new Thread(() -> {
             int i = 0;
             while (!Thread.currentThread().isInterrupted()) {
+                System.out.println("thread loop: " + i);
+
                 try {
                     for (IeeeAddress ieee :
                          new ArrayList<>(deviceStates.keySet())) {
-                        UBabelPacket pkt =
-                            new UBabelPacket(i, i * 2, "pingPONGpingPONGpingPONGpingPONG");
+                        UBabelPacket pkt = new UBabelPacket(
+                            i, i * 2,
+                            "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+                                + "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+                                + "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\n"
+                                + "123456789ABCDE"
+
+                        );
                         sendToDevice(manager, ieee, pkt);
-                        System.out.println("packet: " + pkt);
                         i++;
                     }
                     Thread.sleep(5000);
@@ -195,6 +204,7 @@ public class Main {
         });
         senderThread.setDaemon(true);
         senderThread.start();
+
         Thread.currentThread().join();
     }
 
