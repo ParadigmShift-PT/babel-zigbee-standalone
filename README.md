@@ -19,7 +19,7 @@ The artifact is intended to back a future Babel protocol providing ZigBee connec
 | Band | 2.4 GHz — ZigBee channel 13 by default |
 | Serial transport | USB CDC @ 115200 baud, 8N1, no flow control |
 | PAN ID | `0xE5F2` (default) |
-| Extended PAN ID | `0x0011223344556677_88` (default) |
+| Extended PAN ID | `0x1122334455667788` (default — must be 16 hex chars) |
 | Profile | ZigBee Home Automation (`0x0104`) |
 | Trust centre policy | `TC_JOIN_INSECURE` (open joins; tighten for production) |
 
@@ -27,7 +27,7 @@ The coordinator opens the network for joining via `permitJoin(254)`, formed on a
 
 ### Serial device
 
-The default serial port is hard-coded in `Main.java` as `/dev/tty.usbserial-2130` (macOS naming). On a Raspberry Pi the dongle typically enumerates as `/dev/ttyUSB0` or `/dev/ttyACM0`. Edit the `SERIAL_PORT` constant in `Main.java` (or, once the API is extracted into a library class, pass it as a constructor argument) before flashing a new dongle.
+The serial port is passed in via `ZigBeeConfig.Builder.serialPort(...)`. The smoke-test `Main.java` defaults to `/dev/tty.usbserial-2130` (macOS naming); on a Raspberry Pi the dongle typically enumerates as `/dev/ttyUSB0` or `/dev/ttyACM0`. Edit the `SERIAL_PORT` constant in `Main.java`, or supply your own value when constructing the config from an application.
 
 ## Wire format
 
@@ -81,31 +81,60 @@ Add to your `pom.xml`:
 
 ### Minimal example
 
-`Main.java` is currently the only entry point — it brings up a coordinator end-to-end:
-
 ```java
-ZigBeeSerialPort port = new ZigBeeSerialPort(
-        "/dev/ttyUSB0", 115200, FlowControl.FLOWCONTROL_OUT_NONE);
+ZigBeeConfig cfg = new ZigBeeConfig.Builder()
+        .serialPort("/dev/ttyUSB0")
+        .channel(13)
+        .panId(0xE5F2)
+        .extendedPanId("1122334455667788")
+        // .networkKey(...) .tcLinkKey(...)  // override defaults in production
+        .build();
 
-ZigBeeDongleEzsp dongle = new ZigBeeDongleEzsp(port);
-dongle.updateDefaultPolicy(EzspPolicyId.EZSP_TRUST_CENTER_POLICY,
-                           EzspDecisionId.EZSP_ALLOW_JOINS);
+ZigBeeCoordinator coord = new ZigBeeCoordinator(cfg);
+coord.setPacketHandler((ieee, packet) -> {
+    // runs on the zsmartsystems command-listener thread; hand off to your own
+    // queue/loop if your handler is not thread-safe
+    System.out.printf("packet from %s: id=%d val=%d payload='%s'%n", ieee,
+            packet.getId(), packet.getVal(), packet.getPayloadAsString());
+});
+coord.setHeartbeatHandler((ieee, counter) ->
+        System.out.printf("heartbeat from %s: %d%n", ieee, counter));
 
-ZigBeeNetworkManager manager = new ZigBeeNetworkManager(dongle);
-manager.setSerializer(DefaultSerializer.class, DefaultDeserializer.class);
-
-manager.initialize();
-manager.setZigBeeChannel(ZigBeeChannel.CHANNEL_13);
-manager.setZigBeePanId(0xE5F2);
-manager.setZigBeeExtendedPanId(new ExtendedPanId("001122334455667788"));
-manager.addSupportedClientCluster(0xFF00);
-manager.addSupportedServerCluster(0xFF00);
-
-manager.startup(true);
-manager.permitJoin(254);
+coord.init();              // forms the network, registers listeners
+coord.permitJoin(254);     // open for joining (tighten in production)
 ```
 
-Incoming µBabel packets are surfaced through `addCommandListener(...)`, filtered down to `WriteAttributesCommand` instances on cluster `0xFF00`. Higher-level integrations — such as a future `babel-zigbee-protocol` Babel protocol — will register their own handler and queue packets out to the protocol thread.
+Per-device state — last id/val/payload + heartbeat counter — is also kept internally and reachable via `coord.getDeviceState(ieee)` and `coord.getKnownDevices()`. Higher-level integrations, such as a future `babel-zigbee-protocol` Babel protocol, will register their own handlers and queue packets out to a protocol thread.
+
+### Sending packets back to a device
+
+Sends are unicast and use the same vendor cluster + `Data` attribute. The call issues a ZCL Write Attributes against `END_DEVICE_ENDPOINT` (10) on the named node:
+
+```java
+ZigBeePacket reply = new ZigBeePacket.Builder()
+        .id(42)
+        .val(0xABCD)
+        .payload("ack")
+        .build();
+
+Future<CommandResult> tx = coord.transmit(deviceIeee, reply);
+// fire-and-forget; or block on tx.get() to wait for the ACK / timeout
+```
+
+The destination must already be in `coord.getKnownDevices()` (i.e. the device has joined and its endpoint has been registered, either by the manual bring-up path or by ZDO discovery). If the node, endpoint, or cluster isn't present, `transmit` throws `IllegalStateException` with a descriptive message.
+
+### Configuration knobs
+
+| Builder method | Default | When to override |
+|---|---|---|
+| `serialPort(path)` | — (required) | always — pick the right device node for your OS / dongle |
+| `serialBaud(baud)` | 115200 | non-default Ember firmware builds |
+| `channel(ch)` | 13 | site survey shows interference on 13 |
+| `panId(int)` / `extendedPanId(16-char hex)` | 0xE5F2 / `1122334455667788` | running multiple ZigBee networks side-by-side |
+| `networkKey(key)` / `tcLinkKey(key)` | hard-coded dev defaults | **production** — both keys must match what the end-device firmware carries in `zigbee.h` |
+| `endDeviceId(0xFFFF mask)` | `DEFAULT_END_DEVICE_ID` (0xFFF2) | your end-device firmware advertises a different HA device id |
+| `useManualBringup(bool)` | `true` | your end-device firmware responds to ZDO Active Endpoints / Simple Descriptor requests — in that case set `false` and let zsmartsystems auto-populate the node, endpoints and clusters |
+| `allianceWellKnownKey(key)` | `KEY_ALLIANCE09` | pass `null` to skip `addTransientLinkKey` on NCP firmware that returns `LIBRARY_NOT_PRESENT` |
 
 > **Hardware note:** the library compiles anywhere but requires an Ember EZSP USB dongle (Silicon Labs EM35x / EFR32) to do anything at runtime.
 
