@@ -1,31 +1,68 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>babel-zigbee</groupId>
-    <artifactId>babel.zigbee</artifactId>
+    <groupId>pt.paradigmshift.iot</groupId>
+    <artifactId>babel-zigbee</artifactId>
     <version>0.0.1</version>
+    <name>Babel ZigBee</name>
+    <description>
+        A Java ZigBee coordinator for Raspberry Pi gateways, built on the
+        zsmartsystems ZigBee stack with an Ember (EZSP) USB dongle backend.
+        Forms a ZigBee Home Automation network, registers a vendor-specific
+        cluster (0xFF00), and routes µBabel packets exchanged with ESP32 /
+        Raspberry Pi Pico end devices via ZCL Write Attribute commands.
+        Intended to back a future Babel protocol providing ZigBee connectivity
+        to swarm-style applications running on Raspberry Pi gateways.
+    </description>
+    <url>https://www.paradigmshift.pt</url>
+
+    <licenses>
+        <license>
+            <name>ParadigmShift Proprietary License</name>
+            <url>https://www.paradigmshift.pt</url>
+            <distribution>repo</distribution>
+            <comments>
+                Non-commercial use is permitted; commercial use requires a written
+                licence from ParadigmShift, Lda. See the LICENSE file for the full
+                terms.
+            </comments>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>João Brilha</name>
+            <email>joao.brilha@paradigmshift.pt</email>
+            <organization>ParadigmShift, Lda</organization>
+            <organizationUrl>https://www.paradigmshift.pt</organizationUrl>
+        </developer>
+        <developer>
+            <name>João Leitão</name>
+            <email>jc.leitao@fct.unl.pt</email>
+            <url>https://asc.di.fct.unl.pt/~jleitao</url>
+        </developer>
+        <developer>
+            <name>ParadigmShift</name>
+            <email>info@paradigmshift.pt</email>
+            <organization>ParadigmShift, Lda</organization>
+            <organizationUrl>https://www.paradigmshift.pt</organizationUrl>
+        </developer>
+    </developers>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
+
     <build>
         <sourceDirectory>src/main/java</sourceDirectory>
-        <extensions>
-            <!-- Enabling the use of SSH -->
-            <extension>
-                <groupId>org.apache.maven.wagon</groupId>
-                <artifactId>wagon-ssh-external</artifactId>
-                <version>1.0-beta-6</version>
-            </extension>
-        </extensions>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.8.1</version>
+                <version>3.12.1</version>
                 <configuration>
                     <source>21</source>
                     <target>21</target>
@@ -33,65 +70,152 @@
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.3</version>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <excludes>
+                        <exclude>Main.class</exclude>
+                        <exclude>Main$*.class</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <version>3.3.1</version>
                 <executions>
                     <execution>
-                        <phase>package</phase>
+                        <id>attach-sources</id>
+                        <phase>prepare-package</phase>
                         <goals>
-                            <goal>shade</goal>
+                            <goal>jar-no-fork</goal>
                         </goals>
                         <configuration>
-                            <minimizeJar>false</minimizeJar>
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <dependencyReducedPomLocation>
-                                ${java.io.tmpdir}/dependency-reduced-pom.xml
-                            </dependencyReducedPomLocation>
-                            <relocations>
-                                <relocation>
-                                    <pattern>com.acme.coyote</pattern>
-                                    <shadedPattern>hidden.coyote</shadedPattern>
-                                </relocation>
-                            </relocations>
-                            <transformers>
-                                <transformer
-                                    implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>Main</mainClass>
-                                </transformer>
-                            </transformers>
-                            <filters>
-                                <filter>
-                                    <artifact>*:*</artifact>
-                                    <excludes>
-                                        <exclude>META-INF/*.SF</exclude>
-                                        <exclude>META-INF/*.DSA</exclude>
-                                        <exclude>META-INF/*.RSA</exclude>
-                                    </excludes>
-                                </filter>
-                            </filters>
+                            <excludes>
+                                <exclude>Main.java</exclude>
+                            </excludes>
                         </configuration>
                     </execution>
                 </executions>
             </plugin>
-            <!-- temporarily disable javadoc for this package 
-			<plugin>
-				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-javadoc-plugin</artifactId>
-				<version>3.6.3</version>
-				<executions>
-					<execution>
-						<id>attach-javadocs</id>
-						<phase>prepare-package</phase>
-						<goals>
-							<goal>jar</goal>
-							<goal>javadoc</goal>
-						</goals>
-					</execution>
-				</executions>
-			</plugin>
-			-->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.6.3</version>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <source>21</source>
+                    <doclint>none</doclint>
+                    <quiet>true</quiet>
+                    <windowtitle>Babel ZigBee API</windowtitle>
+                    <doctitle>Babel ZigBee ${project.version} API</doctitle>
+                    <bottom>
+                        Copyright &amp;copy; 2026 ParadigmShift. All rights reserved.
+                        See LICENSE for terms of use.
+                    </bottom>
+                    <sourceFileExcludes>
+                        <sourceFileExclude>Main.java</sourceFileExclude>
+                    </sourceFileExcludes>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
+
+    <distributionManagement>
+        <repository>
+            <id>paradigmshift-repository</id>
+            <url>https://maven.paradigmshift.pt/releases</url>
+        </repository>
+        <snapshotRepository>
+            <id>paradigmshift-repository</id>
+            <url>https://maven.paradigmshift.pt/snapshots</url>
+        </snapshotRepository>
+    </distributionManagement>
+
+    <repositories>
+        <repository>
+            <id>paradigmshift-repository</id>
+            <name>ParadigmShift Repository</name>
+            <url>https://maven.paradigmshift.pt/releases</url>
+        </repository>
+    </repositories>
+
+    <profiles>
+        <profile>
+            <id>executable</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-jar-plugin</artifactId>
+                        <version>3.4.1</version>
+                        <configuration>
+                            <excludes combine.self="override"/>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-shade-plugin</artifactId>
+                        <version>3.5.3</version>
+                        <executions>
+                            <execution>
+                                <id>build-executable-fatjar</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>shade</goal>
+                                </goals>
+                                <configuration>
+                                    <shadedArtifactAttached>true</shadedArtifactAttached>
+                                    <shadedClassifierName>executable</shadedClassifierName>
+                                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                                    <transformers>
+                                        <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                            <mainClass>Main</mainClass>
+                                        </transformer>
+                                        <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                    </transformers>
+                                    <filters>
+                                        <filter>
+                                            <artifact>*:*</artifact>
+                                            <excludes>
+                                                <exclude>META-INF/*.SF</exclude>
+                                                <exclude>META-INF/*.DSA</exclude>
+                                                <exclude>META-INF/*.RSA</exclude>
+                                            </excludes>
+                                        </filter>
+                                    </filters>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-deploy-plugin</artifactId>
+                        <version>3.1.2</version>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-install-plugin</artifactId>
+                        <version>3.1.2</version>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
     <dependencies>
         <dependency>
@@ -115,4 +239,5 @@
             <version>1.4.16</version>
         </dependency>
     </dependencies>
+
 </project>
