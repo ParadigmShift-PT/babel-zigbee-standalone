@@ -6,7 +6,7 @@ The artifact is intended to back a future Babel protocol providing ZigBee connec
 
 **Group ID:** `pt.paradigmshift.iot`
 **Artifact ID:** `babel-zigbee`
-**Current version:** `0.0.1`
+**Current version:** `0.1.0`
 **Tested on:** Raspberry Pi 4 / 5 (and macOS for development) with a Silicon Labs Ember EZSP USB dongle.
 
 ---
@@ -157,6 +157,23 @@ Future<CommandResult> tx = coord.transmit(deviceIeee, reply);
 The destination must already be in `coord.getKnownDevices()` (i.e. the device has joined and its endpoint has been registered, either by the manual bring-up path or by ZDO discovery). If the node, endpoint, or cluster isn't present, `transmit` throws `IllegalStateException` with a descriptive message.
 
 **Payload size limit.** The ZBDongle-E ZCL transport caps the attribute value at 128 bytes. After 6 bytes of ZCL framing and 1 byte for the OCTET_STRING length prefix that leaves `ZigBeeCoordinator.MAX_PACKET_SIZE_BYTES = 121` bytes for the whole `ubabel_zb_packet_t`, i.e. `ZigBeeCoordinator.MAX_PAYLOAD_SIZE_BYTES = 116` bytes for the actual payload after the 5-byte header. `transmit(...)` throws `IllegalArgumentException` if you exceed this — same constraint the ESP firmware enforces on its outgoing path (`ubabel_zb_proto.h`).
+
+### NWK-layer broadcast
+
+Two overloads complement the unicast `transmit`:
+
+```java
+coord.transmit(packet);                                                // ALL_DEVICES (0xFFFF)
+coord.transmit(ZigBeeBroadcastDestination.BROADCAST_RX_ON, packet);    // rx-on-when-idle only
+```
+
+Internally the broadcast path constructs a `WriteAttributesCommand` against the µBabel cluster + `Data` attribute exactly like the unicast path, but sets the destination to a NWK broadcast address and dispatches through `ZigBeeNetworkManager.sendCommand(...)` (no transaction — broadcasts are unacknowledged). Caveats:
+
+- Sleepy end devices that are not currently awake will miss the frame; pick `BROADCAST_RX_ON` deliberately if that matters.
+- The return is `boolean`, not `Future<CommandResult>` — it reflects only whether the NCP accepted the command for transmission.
+- Joined nodes whose endpoint descriptor does not expose the µBabel cluster simply ignore the frame.
+
+Same `MAX_PACKET_SIZE_BYTES` / `MAX_PAYLOAD_SIZE_BYTES` limits apply.
 
 ### Configuration knobs
 

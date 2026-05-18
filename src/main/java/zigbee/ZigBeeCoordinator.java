@@ -3,8 +3,10 @@ package zigbee;
 import com.zsmartsystems.zigbee.ExtendedPanId;
 import com.zsmartsystems.zigbee.IeeeAddress;
 import com.zsmartsystems.zigbee.ZigBeeAnnounceListener;
+import com.zsmartsystems.zigbee.ZigBeeBroadcastDestination;
 import com.zsmartsystems.zigbee.ZigBeeChannel;
 import com.zsmartsystems.zigbee.ZigBeeEndpoint;
+import com.zsmartsystems.zigbee.ZigBeeEndpointAddress;
 import com.zsmartsystems.zigbee.ZigBeeNetworkManager;
 import com.zsmartsystems.zigbee.app.ZigBeeNetworkExtension;
 import com.zsmartsystems.zigbee.ZigBeeNetworkNodeListener;
@@ -260,6 +262,87 @@ public class ZigBeeCoordinator {
         }
         return cluster.writeAttribute(ATTR_DATA, ZclDataType.OCTET_STRING,
                                       new ByteArray(wire));
+    }
+
+    /**
+     * NWK-layer broadcast of a {@link ZigBeePacket} to every joined node in
+     * one-hop reach. The packet is delivered to the µBabel cluster's
+     * {@code Data} attribute ({@link #ATTR_DATA}) on
+     * {@link #END_DEVICE_ENDPOINT} of every recipient. Convenience overload
+     * targeting {@link ZigBeeBroadcastDestination#BROADCAST_ALL_DEVICES}.
+     *
+     * <p>Broadcast caveats:
+     * <ul>
+     *   <li>The ZigBee NWK layer does not deliver to sleepy end devices that
+     *   are not currently awake (use {@code BROADCAST_RX_ON} to deliberately
+     *   skip them, or {@code BROADCAST_ALL_DEVICES} which still depends on
+     *   the device's poll cycle).</li>
+     *   <li>Broadcasts are unacknowledged. The returned value indicates only
+     *   that the NCP accepted the command for transmission — not that any
+     *   peer received it.</li>
+     *   <li>Joined nodes whose endpoint descriptor does not advertise the
+     *   µBabel cluster will simply ignore the frame.</li>
+     * </ul>
+     *
+     * @param packet the µBabel packet to broadcast
+     * @return {@code true} if the NCP accepted the command for transmission
+     * @throws IllegalArgumentException if the packet exceeds
+     *         {@link #MAX_PACKET_SIZE_BYTES} on the wire
+     * @throws IllegalStateException    if {@link #init()} has not been called
+     */
+    public boolean transmit(ZigBeePacket packet) {
+        return transmit(ZigBeeBroadcastDestination.BROADCAST_ALL_DEVICES,
+                        packet);
+    }
+
+    /**
+     * NWK-layer broadcast of a {@link ZigBeePacket} to the given broadcast
+     * scope. See the no-arg overload for caveats.
+     *
+     * @param scope  which set of nodes to address (all devices, rx-on-when-
+     *               idle, routers-and-coordinator, …)
+     * @param packet the µBabel packet to broadcast
+     * @return {@code true} if the NCP accepted the command for transmission
+     */
+    public boolean transmit(ZigBeeBroadcastDestination scope,
+                            ZigBeePacket packet) {
+        if (manager == null) {
+            throw new IllegalStateException("init() must be called first");
+        }
+        if (scope == null) {
+            throw new IllegalArgumentException(
+                    "broadcast scope must not be null");
+        }
+        if (packet == null) {
+            throw new IllegalArgumentException("packet must not be null");
+        }
+
+        byte[] wire = packet.toBytes();
+        if (wire.length > MAX_PACKET_SIZE_BYTES) {
+            throw new IllegalArgumentException(
+                    "ZigBee packet too large for the ZBDongle-E transport: " +
+                    wire.length + " bytes on the wire (max " +
+                    MAX_PACKET_SIZE_BYTES + " — i.e. " +
+                    MAX_PAYLOAD_SIZE_BYTES + " bytes of payload)");
+        }
+
+        // ZclCluster.writeAttribute() is unicast-only (it resolves a remote
+        // endpoint+cluster pair on a known node), so we construct the ZCL
+        // Write Attributes command manually and dispatch it through
+        // sendCommand() with a broadcast NWK destination. Broadcasts are
+        // unacknowledged at the NWK layer — no transaction to track.
+        WriteAttributeRecord record = new WriteAttributeRecord();
+        record.setAttributeIdentifier(ATTR_DATA);
+        record.setAttributeDataType(ZclDataType.OCTET_STRING);
+        record.setAttributeValue(new ByteArray(wire));
+
+        WriteAttributesCommand cmd = new WriteAttributesCommand();
+        cmd.setClusterId(UBABEL_CLUSTER_ID);
+        cmd.setRecords(Collections.singletonList(record));
+        cmd.setDestinationAddress(
+                new ZigBeeEndpointAddress(scope.getKey(), END_DEVICE_ENDPOINT));
+
+        return manager.sendCommand(cmd);
     }
 
     /** Closes the network manager and releases the serial port. */
