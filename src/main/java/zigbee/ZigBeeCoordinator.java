@@ -314,6 +314,30 @@ public class ZigBeeCoordinator {
         return Collections.unmodifiableCollection(deviceStates.keySet());
     }
 
+    /**
+     * Cross-platform best-effort discovery of the Ember EZSP USB dongle's
+     * device-node path — shorthand for {@link SerialPortDiscovery#autoDiscover()}.
+     *
+     * <p>Returns a path suitable for
+     * {@link ZigBeeConfig.Builder#serialPort(String)} when exactly one
+     * dongle is plugged in. Throws {@link IllegalStateException} (with a
+     * descriptive list of what was seen) when zero or multiple candidates
+     * are found — it intentionally never guesses. See
+     * {@link SerialPortDiscovery} for the per-OS filtering details and for
+     * {@link SerialPortDiscovery#listCandidates()} when you want to drive
+     * your own selection UI.
+     *
+     * <p>Example:
+     * <pre>{@code
+     * ZigBeeConfig cfg = new ZigBeeConfig.Builder()
+     *         .serialPort(ZigBeeCoordinator.autoDiscoverSerialPort())
+     *         .build();
+     * }</pre>
+     */
+    public static String autoDiscoverSerialPort() {
+        return SerialPortDiscovery.autoDiscover();
+    }
+
     // -------------------------------------------------------------------------
     // Setup helpers
     // -------------------------------------------------------------------------

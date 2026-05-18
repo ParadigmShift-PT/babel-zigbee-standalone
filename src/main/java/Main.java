@@ -6,7 +6,6 @@ import zigbee.ZigBeePacket;
 
 public class Main {
 
-    static final String DEFAULT_SERIAL_PORT = "/dev/tty.usbserial-2130";
     private static final long TX_PERIOD_MS = 5_000;
 
     public static void main(String[] args) throws Exception {
@@ -17,20 +16,37 @@ public class Main {
         //
         // Flags (any order):
         //   --rx-only | rx-only | no-tx   skip transmission (pure receiver)
-        //   --serial-port <path>           dongle device node
-        //                                  (default /dev/tty.usbserial-2130;
-        //                                  on a Pi typically /dev/ttyUSB0 or
-        //                                  /dev/ttyACM0)
+        //   --serial-port <path>           dongle device node. Omit to let
+        //                                  ZigBeeCoordinator.autoDiscoverSerialPort()
+        //                                  find it (works best on Linux; on
+        //                                  macOS / Windows you may need to
+        //                                  pass it explicitly when more than
+        //                                  one USB-serial device is plugged
+        //                                  in).
         //   --dest-addr <ieee>             unicast to the given IEEE address
         //                                  (16 hex chars, colons optional)
         //                                  instead of the first joined device.
         //                                  Ignored when --rx-only is set.
         Args parsed = Args.parse(args);
         boolean transmit = parsed.transmit;
-        String serialPort = parsed.serialPort;
         IeeeAddress destAddr = parsed.destAddr; // null = first joined device
 
-        System.out.println("Serial port: " + serialPort);
+        String serialPort = parsed.serialPort;
+        if (serialPort == null) {
+            try {
+                serialPort = ZigBeeCoordinator.autoDiscoverSerialPort();
+                System.out.println("Serial port: " + serialPort
+                                   + "  (auto-discovered)");
+            } catch (IllegalStateException e) {
+                System.err.println(e.getMessage());
+                System.err.println(
+                        "Re-run with --serial-port <path> to override.");
+                System.exit(1);
+                return;
+            }
+        } else {
+            System.out.println("Serial port: " + serialPort);
+        }
         if (transmit) {
             System.out.println(destAddr == null
                     ? String.format(
@@ -134,7 +150,7 @@ public class Main {
 
         static Args parse(String[] args) {
             boolean transmit = true;
-            String serialPort = DEFAULT_SERIAL_PORT;
+            String serialPort = null;
             IeeeAddress destAddr = null;
             for (int i = 0; i < args.length; i++) {
                 String a = args[i].toLowerCase();

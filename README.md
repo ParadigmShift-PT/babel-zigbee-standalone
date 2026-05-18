@@ -27,11 +27,39 @@ The coordinator opens the network for joining via `permitJoin(254)`, formed on a
 
 ### Serial device
 
-The serial port is passed in via `ZigBeeConfig.Builder.serialPort(...)`. The smoke-test `Main.java` defaults to `/dev/tty.usbserial-2130` (macOS naming); on a Raspberry Pi the dongle typically enumerates as `/dev/ttyUSB0` or `/dev/ttyACM0`. Pass `--serial-port <path>` on the command line to override the default, or supply your own value when constructing the config from an application. A quick way to find the right node after plugging the dongle in:
+The serial port is passed in via `ZigBeeConfig.Builder.serialPort(...)`. The library has no hardcoded default. On a Raspberry Pi the dongle typically enumerates as `/dev/ttyUSB0` (CP210x bridge) or `/dev/ttyACM0` (CDC); on macOS as `/dev/cu.usbserial-<serial>`; on Windows as `COMn`.
+
+If you do not know the path up front, call the cross-platform auto-discovery helper:
+
+```java
+String port = ZigBeeCoordinator.autoDiscoverSerialPort();   // throws if 0 or >1 found
+ZigBeeConfig cfg = new ZigBeeConfig.Builder()
+        .serialPort(port)
+        .build();
+```
+
+Auto-discovery is intentionally conservative — it returns a path only when exactly one candidate is found, and throws `IllegalStateException` (with a diagnostic listing of what was seen) for zero or multiple matches. Per-OS behaviour:
+
+| OS | Strategy | Strength |
+|---|---|---|
+| **Linux** | Walks `/dev/serial/by-id/` and keeps entries matching `Silicon_Labs` / `CP210x` / `Sonoff` / `ITead` / `EFR32` / `Ember` (case-insensitive), resolving symlinks to the underlying `/dev/ttyUSB*` or `/dev/ttyACM*`. Falls back to filtering `jssc`'s port list to those two patterns if `by-id` is empty. | Strong — vendor strings come from the USB device descriptor. |
+| **macOS** | Filters `jssc`'s port list to `/dev/cu.usbserial-*`, `/dev/cu.usbmodem*`, `/dev/tty.usbserial-*`, `/dev/tty.usbmodem*`; prefers `cu.*` and drops the `tty.*` twin when both are present. | Decent — identifies "a USB-serial chip" but not specifically an Ember dongle. |
+| **Windows** | Returns `jssc`'s `COM*` list verbatim — Windows does not expose enough metadata through plain Java to filter further without WMI / JNA. | Weak. |
+
+If your application wants to drive its own selection UI rather than fail on ambiguity, use the lower-level helper which never throws:
+
+```java
+List<SerialPortDiscovery.Candidate> candidates =
+        SerialPortDiscovery.listCandidates();
+// each Candidate has path(), description() (e.g. the by-id symlink it came
+// from), and source() (LINUX_BY_ID / LINUX_TTY / MAC_USB_SERIAL / WINDOWS_COM)
+```
+
+Manual lookup hints when something goes wrong:
 
 ```bash
 ls -l /dev/serial/by-id/        # Linux — stable per-dongle symlinks
-ls /dev/tty.usbserial-*         # macOS
+ls /dev/cu.usbserial-*          # macOS
 ```
 
 ## Wire format
@@ -179,24 +207,23 @@ Three CLI flags are recognised (any order):
 | Flag | Effect |
 |---|---|
 | `--rx-only` (also `rx-only` / `no-tx`) | Disable transmission and use the program as a pure receiver — handy when isolating whether observed packets are real over-the-air traffic from the end device or are echoes of this coordinator's own TX cycle. |
-| `--serial-port <path>` | Dongle device node. Default `/dev/tty.usbserial-2130` (macOS); on a Pi typically `/dev/ttyUSB0` or `/dev/ttyACM0`. |
+| `--serial-port <path>` | Dongle device node. **Omit to auto-discover** via `ZigBeeCoordinator.autoDiscoverSerialPort()` (works best on Linux; see *Serial device* above). On a Pi the dongle typically enumerates as `/dev/ttyUSB0` or `/dev/ttyACM0`. |
 | `--dest-addr <ieee>` | Unicast every TX packet to the given IEEE address (16 hex chars, colons optional — e.g. `00:11:22:33:44:55:66:77` or `0011223344556677`) instead of the first joined device. Useful when several end devices have joined and you want to target one specifically. Ignored when `--rx-only` is set. |
 
 Examples:
 
 ```bash
-# Default macOS smoke test
+# Auto-discover the dongle (succeeds when exactly one Ember-style port is present)
 java -jar target/babel-zigbee-0.0.1-executable.jar
 
-# Raspberry Pi — dongle on /dev/ttyUSB0
+# Explicit path — e.g. when multiple USB-serial devices are plugged in
 java -jar target/babel-zigbee-0.0.1-executable.jar --serial-port /dev/ttyUSB0
 
 # Pure receiver
-java -jar target/babel-zigbee-0.0.1-executable.jar --serial-port /dev/ttyUSB0 --rx-only
+java -jar target/babel-zigbee-0.0.1-executable.jar --rx-only
 
 # Pin the TX target instead of "first joined device"
 java -jar target/babel-zigbee-0.0.1-executable.jar \
-    --serial-port /dev/ttyUSB0 \
     --dest-addr 00:11:22:33:44:55:66:77
 ```
 
