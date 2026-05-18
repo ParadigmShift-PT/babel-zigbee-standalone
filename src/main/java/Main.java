@@ -41,12 +41,17 @@ public class Main {
     // Network configuration
     // -------------------------------------------------------------------------
 
-    private static final String SERIAL_PORT = "/dev/tty.usbserial-210";
+    private static final String SERIAL_PORT = "/dev/tty.usbserial-2130";
     private static final int SERIAL_BAUD = 115200;
     private static final ZigBeeChannel ZIGBEE_CHANNEL =
         ZigBeeChannel.CHANNEL_13;
     private static final int ZIGBEE_PAN_ID = 0xE5F2;
-    private static final String ZIGBEE_EPAN_ID = "001122334455667788";
+    // private static final int ZIGBEE_PAN_ID =
+    // 0xFFFF; // don't care, the network sets a random one
+    private static final ExtendedPanId ZIGBEE_EPAN_ID =
+        new ExtendedPanId("001122334455667788");
+    // private static final ExtendedPanId ZIGBEE_EPAN_ID =
+    // ExtendedPanId.createRandom();
 
     // ZigBee well-known join key (ZigBeeAlliance09). Only needed if the NCP
     // supports transient link keys — on this hardware it returns
@@ -255,7 +260,7 @@ public class Main {
     private static void configureNetwork(ZigBeeNetworkManager manager) {
         manager.setZigBeeChannel(ZIGBEE_CHANNEL);
         manager.setZigBeePanId(ZIGBEE_PAN_ID);
-        manager.setZigBeeExtendedPanId(new ExtendedPanId(ZIGBEE_EPAN_ID));
+        manager.setZigBeeExtendedPanId(ZIGBEE_EPAN_ID);
         manager.setZigBeeNetworkKey(KEY_NETWORK);
         manager.setZigBeeLinkKey(KEY_TC_LINK);
 
