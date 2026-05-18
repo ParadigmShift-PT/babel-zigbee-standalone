@@ -27,7 +27,12 @@ The coordinator opens the network for joining via `permitJoin(254)`, formed on a
 
 ### Serial device
 
-The serial port is passed in via `ZigBeeConfig.Builder.serialPort(...)`. The smoke-test `Main.java` defaults to `/dev/tty.usbserial-2130` (macOS naming); on a Raspberry Pi the dongle typically enumerates as `/dev/ttyUSB0` or `/dev/ttyACM0`. Edit the `SERIAL_PORT` constant in `Main.java`, or supply your own value when constructing the config from an application.
+The serial port is passed in via `ZigBeeConfig.Builder.serialPort(...)`. The smoke-test `Main.java` defaults to `/dev/tty.usbserial-2130` (macOS naming); on a Raspberry Pi the dongle typically enumerates as `/dev/ttyUSB0` or `/dev/ttyACM0`. Pass `--serial-port <path>` on the command line to override the default, or supply your own value when constructing the config from an application. A quick way to find the right node after plugging the dongle in:
+
+```bash
+ls -l /dev/serial/by-id/        # Linux — stable per-dongle symlinks
+ls /dev/tty.usbserial-*         # macOS
+```
 
 ## Wire format
 
@@ -123,6 +128,8 @@ Future<CommandResult> tx = coord.transmit(deviceIeee, reply);
 
 The destination must already be in `coord.getKnownDevices()` (i.e. the device has joined and its endpoint has been registered, either by the manual bring-up path or by ZDO discovery). If the node, endpoint, or cluster isn't present, `transmit` throws `IllegalStateException` with a descriptive message.
 
+**Payload size limit.** The ZBDongle-E ZCL transport caps the attribute value at 128 bytes. After 6 bytes of ZCL framing and 1 byte for the OCTET_STRING length prefix that leaves `ZigBeeCoordinator.MAX_PACKET_SIZE_BYTES = 121` bytes for the whole `ubabel_zb_packet_t`, i.e. `ZigBeeCoordinator.MAX_PAYLOAD_SIZE_BYTES = 116` bytes for the actual payload after the 5-byte header. `transmit(...)` throws `IllegalArgumentException` if you exceed this — same constraint the ESP firmware enforces on its outgoing path (`ubabel_zb_proto.h`).
+
 ### Configuration knobs
 
 | Builder method | Default | When to override |
@@ -131,9 +138,10 @@ The destination must already be in `coord.getKnownDevices()` (i.e. the device ha
 | `serialBaud(baud)` | 115200 | non-default Ember firmware builds |
 | `channel(ch)` | 13 | site survey shows interference on 13 |
 | `panId(int)` / `extendedPanId(16-char hex)` | 0xE5F2 / `1122334455667788` | running multiple ZigBee networks side-by-side |
-| `networkKey(key)` / `tcLinkKey(key)` | hard-coded dev defaults | **production** — both keys must match what the end-device firmware carries in `zigbee.h` |
+| `networkKey(key)` | hard-coded dev default | **production** — but the value only needs to be unique per network; the coordinator distributes it to joining devices encrypted with the TC link key, so it does *not* need to match anything on the ESP firmware |
+| `tcLinkKey(key)` | hard-coded dev default | **production** — this one *must* match the bytes compiled into the ESP firmware (`ubabel_zb_proto.c`); both sides preshare it and the coordinator uses it to wrap the network-key delivery during the secured-join handshake |
 | `endDeviceId(0xFFFF mask)` | `DEFAULT_END_DEVICE_ID` (0xFFF2) | your end-device firmware advertises a different HA device id |
-| `useManualBringup(bool)` | `true` | your end-device firmware responds to ZDO Active Endpoints / Simple Descriptor requests — in that case set `false` and let zsmartsystems auto-populate the node, endpoints and clusters |
+| `useManualBringup(bool)` | `true` | the historical µBabel ESP firmware bring-up path (default). The firmware does register a real endpoint via `esp_zb_device_register()`, so setting this to `false` and letting zsmartsystems auto-populate via ZDO is expected to work — worth trying once you can test against real hardware |
 | `allianceWellKnownKey(key)` | `KEY_ALLIANCE09` | pass `null` to skip `addTransientLinkKey` on NCP firmware that returns `LIBRARY_NOT_PRESENT` |
 
 > **Hardware note:** the library compiles anywhere but requires an Ember EZSP USB dongle (Silicon Labs EM35x / EFR32) to do anything at runtime.
@@ -153,7 +161,7 @@ mvn deploy    # publish to maven.paradigmshift.pt (requires REPOSILITE_TOKEN)
 
 ### Smoke test
 
-`Main.java` is a smoke-test entry point — it forms the network, opens it for joining, and prints every µBabel packet and heartbeat received. To run it:
+`Main.java` is a smoke-test entry point — it opens the dongle, forms the network, opens it for joining, prints every µBabel packet and heartbeat received, and by default every 5 seconds picks the first joined device and sends it a `"hello N"` packet to exercise the coordinator-to-device transmit path. To run it:
 
 ```bash
 mvn exec:java -Dexec.mainClass=Main
@@ -166,6 +174,34 @@ mvn clean package -P executable
 java -jar target/babel-zigbee-0.0.1-executable.jar
 ```
 
+Three CLI flags are recognised (any order):
+
+| Flag | Effect |
+|---|---|
+| `--rx-only` (also `rx-only` / `no-tx`) | Disable transmission and use the program as a pure receiver — handy when isolating whether observed packets are real over-the-air traffic from the end device or are echoes of this coordinator's own TX cycle. |
+| `--serial-port <path>` | Dongle device node. Default `/dev/tty.usbserial-2130` (macOS); on a Pi typically `/dev/ttyUSB0` or `/dev/ttyACM0`. |
+| `--dest-addr <ieee>` | Unicast every TX packet to the given IEEE address (16 hex chars, colons optional — e.g. `00:11:22:33:44:55:66:77` or `0011223344556677`) instead of the first joined device. Useful when several end devices have joined and you want to target one specifically. Ignored when `--rx-only` is set. |
+
+Examples:
+
+```bash
+# Default macOS smoke test
+java -jar target/babel-zigbee-0.0.1-executable.jar
+
+# Raspberry Pi — dongle on /dev/ttyUSB0
+java -jar target/babel-zigbee-0.0.1-executable.jar --serial-port /dev/ttyUSB0
+
+# Pure receiver
+java -jar target/babel-zigbee-0.0.1-executable.jar --serial-port /dev/ttyUSB0 --rx-only
+
+# Pin the TX target instead of "first joined device"
+java -jar target/babel-zigbee-0.0.1-executable.jar \
+    --serial-port /dev/ttyUSB0 \
+    --dest-addr 00:11:22:33:44:55:66:77
+```
+
+> **Note:** unlike LoRa, there is no `--own-addr` flag — the coordinator's IEEE address is taken from the EZSP dongle's MAC and is not software-configurable from this layer.
+
 The accompanying `Makefile` is a shortcut for the same flow:
 
 ```bash
@@ -173,6 +209,8 @@ make build    # mvn clean package -P executable
 make run      # java -jar target/babel-zigbee-0.0.1-executable.jar
 make          # build + run
 ```
+
+`make run` passes no arguments — supply flags directly to `java -jar …` when you need them, or extend the Makefile target locally.
 
 ## Releasing
 

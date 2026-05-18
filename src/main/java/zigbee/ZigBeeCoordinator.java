@@ -69,6 +69,18 @@ public class ZigBeeCoordinator {
      *  different value. */
     public static final int DEFAULT_END_DEVICE_ID = 0xFFF2;
 
+    /** Maximum on-the-wire size of the {@code ubabel_zb_packet_t} carried in
+     *  the {@code Data} attribute. The ZBDongle-E ZCL transport caps the
+     *  attribute value at 128 bytes; subtracting 6 bytes of ZCL framing
+     *  overhead and 1 byte for the OCTET_STRING length prefix leaves 121
+     *  bytes for the actual packet (see {@code ubabel_zb_proto.h} in the
+     *  uBabel firmware). */
+    public static final int MAX_PACKET_SIZE_BYTES = 121;
+
+    /** Maximum µBabel payload size in bytes — {@link #MAX_PACKET_SIZE_BYTES}
+     *  minus the 5-byte {@code ubabel_zb_packet_t} header. */
+    public static final int MAX_PAYLOAD_SIZE_BYTES = MAX_PACKET_SIZE_BYTES - 5;
+
     private final ZigBeeConfig cfg;
 
     private ZigBeeSerialPort port;
@@ -238,8 +250,16 @@ public class ZigBeeCoordinator {
                     Integer.toHexString(UBABEL_CLUSTER_ID));
         }
 
+        byte[] wire = packet.toBytes();
+        if (wire.length > MAX_PACKET_SIZE_BYTES) {
+            throw new IllegalArgumentException(
+                    "ZigBee packet too large for the ZBDongle-E transport: " +
+                    wire.length + " bytes on the wire (max " +
+                    MAX_PACKET_SIZE_BYTES + " — i.e. " +
+                    MAX_PAYLOAD_SIZE_BYTES + " bytes of payload)");
+        }
         return cluster.writeAttribute(ATTR_DATA, ZclDataType.OCTET_STRING,
-                                      new ByteArray(packet.toBytes()));
+                                      new ByteArray(wire));
     }
 
     /** Closes the network manager and releases the serial port. */
@@ -485,7 +505,8 @@ public class ZigBeeCoordinator {
         IeeeAddress ieee = sourceNode.getIeeeAddress();
 
         for (WriteAttributeRecord record : cmd.getRecords()) {
-            switch (record.getAttributeIdentifier()) {
+            int attrId = record.getAttributeIdentifier();
+            switch (attrId) {
             case ATTR_DATA -> {
                 byte[] raw = ((ByteArray) record.getAttributeValue()).get();
                 handleDataPacket(raw, ieee);
@@ -494,6 +515,17 @@ public class ZigBeeCoordinator {
                 int counter = ((Number) record.getAttributeValue()).intValue();
                 handleHeartbeat(counter, ieee);
             }
+            // The µBabel ESP firmware also defines 0x0001 SENSOR_READING,
+            // 0x0002 COMMAND, 0x0005 DISCOVERY, 0x0006 DISCOVERY_REQ on the
+            // same cluster. Surface them so an interop gap is visible rather
+            // than silently dropped.
+            default -> System.err.printf(
+                    "WriteAttributes from %s: unhandled attr 0x%04X " +
+                    "(value type=%s) — dropped%n",
+                    ieee, attrId,
+                    record.getAttributeValue() == null
+                            ? "null"
+                            : record.getAttributeValue().getClass().getSimpleName());
             }
         }
     }
@@ -659,12 +691,19 @@ public class ZigBeeCoordinator {
             // silently truncated by zsmartsystems' BigInteger-based parser, so
             // we validate length explicitly in the builder.
             private String extendedPanId = "1122334455667788";
-            // 16-byte network key. Pattern is "odd bytes then even bytes";
-            // both halves must match what the ESP firmware in zigbee.h carries
-            // for the network to form.
+            // 16-byte preconfigured network key. The coordinator chooses this
+            // value and distributes it to joining devices encrypted with the
+            // trust-centre link key during the secured-join handshake, so the
+            // ESP firmware does *not* need to carry the same constant. Only
+            // the TC link key below must match the value compiled into the
+            // ESP firmware (ubabel_zb_proto.c).
             private ZigBeeKey networkKey = new ZigBeeKey(new int[] {
                     0x01, 0x03, 0x05, 0x07, 0x09, 0x0B, 0x0D, 0x0F,
                     0x00, 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E});
+            // 16-byte trust-centre link key. THIS one must match the ESP
+            // firmware (ubabel_zb_proto.c carries the same 16 bytes) — both
+            // sides preshare it; the coordinator uses it to encrypt the
+            // network-key delivery during the secured-join handshake.
             private ZigBeeKey tcLinkKey = new ZigBeeKey(new int[] {
                     0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
                     0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89});
@@ -737,12 +776,19 @@ public class ZigBeeCoordinator {
 
             /**
              * Whether the coordinator should manually create node and
-             * endpoint objects when a device announces itself. Required when
-             * the end-device firmware does not implement ZDO server responses
-             * (Active Endpoints / Simple Descriptor) — the current µBabel ESP
-             * firmware falls in this bucket. Set to {@code false} if your
-             * end devices respond to ZDO discovery, in which case the
-             * zsmartsystems stack auto-populates everything.
+             * endpoint objects when a device announces itself. Defaults to
+             * {@code true} to preserve the historical µBabel ESP bring-up
+             * path verbatim.
+             *
+             * <p>The current µBabel ESP firmware <em>does</em> call
+             * {@code esp_zb_device_register()} with a populated cluster list,
+             * and the default ESP-Zigbee stack auto-responds to ZDO Active
+             * Endpoints / Simple Descriptor requests — so setting this to
+             * {@code false} and letting zsmartsystems auto-populate the node
+             * via standard ZDO discovery is expected to work in practice.
+             * Try it once you can test against real hardware; if discovery
+             * doesn't complete, flip back to {@code true} and the manual
+             * workaround takes over.
              */
             public Builder useManualBringup(boolean enabled) {
                 this.useManualBringup = enabled;
