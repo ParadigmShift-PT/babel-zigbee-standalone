@@ -271,7 +271,7 @@ git push origin v0.0.1
 
 Copyright (c) 2026 ParadigmShift, Lda. See [LICENSE](LICENSE) for full terms.
 
-This artifact is developed and maintained exclusively by ParadigmShift, Lda. It has no relationship to NOVA FCT or the TaRDIS European research project.
+This artifact is developed and maintained exclusively by ParadigmShift, Lda.
 
 Commercial use outside of ParadigmShift requires a written licence.
 Contact: [info@paradigmshift.pt](mailto:info@paradigmshift.pt)
