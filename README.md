@@ -6,7 +6,7 @@ The artifact is intended to back a future Babel protocol providing ZigBee connec
 
 **Group ID:** `pt.paradigmshift.iot`
 **Artifact ID:** `babel-zigbee`
-**Current version:** `0.1.0`
+**Current version:** `0.2.0`
 **Tested on:** Raspberry Pi 4 / 5 (and macOS for development) with a Silicon Labs Ember EZSP USB dongle.
 
 ---
@@ -107,7 +107,7 @@ Add to your `pom.xml`:
     <dependency>
         <groupId>pt.paradigmshift.iot</groupId>
         <artifactId>babel-zigbee</artifactId>
-        <version>0.0.1</version>
+        <version>0.2.0</version>
     </dependency>
 </dependencies>
 ```
@@ -195,7 +195,7 @@ Same `MAX_PACKET_SIZE_BYTES` / `MAX_PAYLOAD_SIZE_BYTES` limits apply.
 
 ## Building
 
-Requires Java 21 and Maven 3.6+.
+Requires Java 17 and Maven 3.6+.
 
 ```bash
 mvn verify    # compile (no tests yet)

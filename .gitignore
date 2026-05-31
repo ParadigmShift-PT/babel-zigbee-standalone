@@ -494,3 +494,6 @@ buildNumber.properties
 # End of https://www.gitignore.io/api/java,latex,macos,maven,eclipse,intellij
 
 ._*
+
+# Claude Code per-project guidance (local, not committed)
+CLAUDE.md
