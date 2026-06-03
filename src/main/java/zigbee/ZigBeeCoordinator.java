@@ -80,16 +80,19 @@ public class ZigBeeCoordinator {
      *  different value. */
     public static final int DEFAULT_END_DEVICE_ID = 0xFFF2;
 
-    /** Maximum on-the-wire size of the {@code ubabel_zb_packet_t} carried in
-     *  the {@code Data} attribute. The ZBDongle-E ZCL transport caps the
-     *  attribute value at 128 bytes; subtracting 6 bytes of ZCL framing
-     *  overhead and 1 byte for the OCTET_STRING length prefix leaves 121
-     *  bytes for the actual packet (see {@code ubabel_zb_proto.h} in the
-     *  uBabel firmware). */
+    /** Maximum on-the-wire size of the OCTET_STRING value (a wrapped
+     *  {@code ubabel_packet_t}) carried in the {@code Data} attribute. The
+     *  ZBDongle-E ZCL transport caps the attribute value at 128 bytes;
+     *  subtracting 6 bytes of ZCL framing overhead and 1 byte for the
+     *  OCTET_STRING length prefix leaves 121 bytes for the value (see
+     *  {@code ZB_MAX_PACKET_SIZE} in {@code ubabel_zb_proto.h} on the µBabel
+     *  side). {@link #transmit} enforces this against {@code packet.getPayload()}. */
     public static final int MAX_PACKET_SIZE_BYTES = 121;
 
-    /** Maximum µBabel payload size in bytes — {@link #MAX_PACKET_SIZE_BYTES}
-     *  minus the 5-byte {@code ubabel_zb_packet_t} header. */
+    /** Historical payload budget — {@link #MAX_PACKET_SIZE_BYTES} minus the
+     *  5 bytes the (now-scrapped) {@code ubabel_zb_packet_t} header once cost.
+     *  Retained as a conservative application-payload guideline; the transport
+     *  cap actually enforced on the wire is {@link #MAX_PACKET_SIZE_BYTES}. */
     public static final int MAX_PAYLOAD_SIZE_BYTES = MAX_PACKET_SIZE_BYTES - 5;
 
     private final ZigBeeConfig cfg;
