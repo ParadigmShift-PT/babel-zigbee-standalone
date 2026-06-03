@@ -43,7 +43,10 @@ import java.util.Map;
 import java.util.Set;
 import com.zsmartsystems.zigbee.CommandResult;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 /**
@@ -66,6 +69,12 @@ public class ZigBeeCoordinator {
     public static final int UBABEL_CLUSTER_ID = 0xFF00;
     public static final int ATTR_DATA = 0x0003;
     public static final int ATTR_HEARTBEAT = 0x0004;
+    public static final int ATTR_DISCOVERY = 0x0005;
+
+    /** Max practical join-window duration (s). ZigBee 3.0 deprecated 0xFF "permanent". */
+    public static final int PERMIT_JOIN_MAX_SECONDS = 254;
+    /** Re-permit cadence for {@link #permitJoinPermanently()} — a little under the window. */
+    private static final int PERMIT_JOIN_REFRESH_SECONDS = 240;
     /** Default HA device id advertised by the ESP firmware. Override via
      *  {@link ZigBeeConfig.Builder#endDeviceId(int)} if your firmware uses a
      *  different value. */
@@ -95,6 +104,9 @@ public class ZigBeeCoordinator {
 
     private volatile BiConsumer<IeeeAddress, ZigBeePacket> packetHandler;
     private volatile BiConsumer<IeeeAddress, Integer> heartbeatHandler;
+
+    /** Daemon scheduler that keeps the join window open for {@link #permitJoinPermanently()}; null until enabled. */
+    private ScheduledExecutorService permitJoinScheduler;
 
     public ZigBeeCoordinator(ZigBeeConfig cfg) {
         if (cfg == null) {
@@ -190,6 +202,38 @@ public class ZigBeeCoordinator {
             throw new IllegalStateException("init() must be called first");
         }
         manager.permitJoin(seconds);
+    }
+
+    /**
+     * Keeps the network open for joining <em>indefinitely</em>. ZigBee 3.0 deprecated
+     * the {@code 0xFF} "permanent" duration and the Ember stack caps a single window
+     * at ~{@value #PERMIT_JOIN_MAX_SECONDS}s, so this re-issues
+     * {@code permitJoin(}{@value #PERMIT_JOIN_MAX_SECONDS}{@code )} on a periodic daemon
+     * timer rather than relying on one permanent window. (Note: {@code permitJoin(0)}
+     * would <em>disable</em> joining, not make it permanent.) Idempotent. An always-open
+     * join window is a security trade-off — gate it behind config and prefer closing it
+     * once the fleet is provisioned.
+     */
+    public synchronized void permitJoinPermanently() {
+        if (manager == null) {
+            throw new IllegalStateException("init() must be called first");
+        }
+        manager.permitJoin(PERMIT_JOIN_MAX_SECONDS);
+        if (permitJoinScheduler == null) {
+            permitJoinScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "zb-permit-join-refresh");
+                t.setDaemon(true);
+                return t;
+            });
+            permitJoinScheduler.scheduleAtFixedRate(() -> {
+                try {
+                    manager.permitJoin(PERMIT_JOIN_MAX_SECONDS);
+                } catch (Exception e) {
+                    System.err.println("permitJoin refresh failed: " + e);
+                }
+            }, PERMIT_JOIN_REFRESH_SECONDS, PERMIT_JOIN_REFRESH_SECONDS,
+               TimeUnit.SECONDS);
+        }
     }
 
     /**
@@ -622,10 +666,14 @@ public class ZigBeeCoordinator {
                 int counter = ((Number) record.getAttributeValue()).intValue();
                 handleHeartbeat(counter, ieee);
             }
+            case ATTR_DISCOVERY -> {
+                byte[] raw = ((ByteArray) record.getAttributeValue()).get();
+                handleDiscovery(raw, ieee);
+            }
             // The µBabel ESP firmware also defines 0x0001 SENSOR_READING,
-            // 0x0002 COMMAND, 0x0005 DISCOVERY, 0x0006 DISCOVERY_REQ on the
-            // same cluster. Surface them so an interop gap is visible rather
-            // than silently dropped.
+            // 0x0002 COMMAND, 0x0006 DISCOVERY_REQ on the same cluster.
+            // Surface them so an interop gap is visible rather than silently
+            // dropped.
             default -> System.err.printf(
                     "WriteAttributes from %s: unhandled attr 0x%04X " +
                     "(value type=%s) — dropped%n",
@@ -665,6 +713,37 @@ public class ZigBeeCoordinator {
                     "Packet from %s: id=%d val=%d payload='%s'%n", ieee,
                     packet.getId(), packet.getVal(),
                     packet.getPayloadAsString());
+        }
+    }
+
+    /**
+     * Handle a µBabel DISCOVERY attribute write ({@link #ATTR_DISCOVERY}, 0x0005).
+     * Unlike {@link #ATTR_DATA}, the OCTET_STRING value here is a bare µBabel
+     * discovery payload ({@code discovery_msg_t}), <em>not</em> a
+     * {@code ubabel_zb_packet_t} — so it is surfaced as a {@link ZigBeePacket}
+     * whose payload is the raw bytes (id/val left 0) via the same
+     * {@link #packetHandler} as data, mirroring how the LoRa side surfaces a
+     * received frame. (Caveat: like the current raw LoRa discovery, the bytes
+     * carry no leading destProto envelope, so higher layers see/log it but won't
+     * route it until µBabel emits the wrapped {@code ubabel_packet_t} form.)
+     */
+    private void handleDiscovery(byte[] raw, IeeeAddress ieee) {
+        if (raw == null) {
+            System.err.printf("Discovery from %s: null value — dropped%n", ieee);
+            return;
+        }
+        ZigBeePacket packet = new ZigBeePacket.Builder().payload(raw).build();
+        BiConsumer<IeeeAddress, ZigBeePacket> h = this.packetHandler;
+        if (h != null) {
+            try {
+                h.accept(ieee, packet);
+            } catch (Exception e) {
+                System.err.println("ZigBee discovery handler threw: " + e);
+                e.printStackTrace();
+            }
+        } else {
+            System.out.printf("Discovery from %s: %d bytes (no handler)%n",
+                              ieee, raw.length);
         }
     }
 
