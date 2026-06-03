@@ -6,7 +6,7 @@ The artifact is intended to back a future Babel protocol providing ZigBee connec
 
 **Group ID:** `pt.paradigmshift.iot`
 **Artifact ID:** `babel-zigbee`
-**Current version:** `0.2.0`
+**Current version:** `0.4.0`
 **Tested on:** Raspberry Pi 4 / 5 (and macOS for development) with a Silicon Labs Ember EZSP USB dongle.
 
 ---
@@ -72,21 +72,13 @@ ls /dev/cu.usbserial-*          # macOS
 | Coordinator endpoint | `1` |
 | End device endpoint | `10` |
 | µBabel cluster ID | `0xFF00` |
-| Data attribute (OCTET_STRING) | `0x0003` — carries `ubabel_zb_packet_t` |
+| Data attribute (OCTET_STRING) | `0x0003` — carries a wrapped `ubabel_packet_t` |
+| Discovery attribute (OCTET_STRING) | `0x0005` — also a wrapped `ubabel_packet_t` |
 | Heartbeat attribute (UINT16) | `0x0004` — monotonic counter |
 
-`ubabel_zb_packet_t` is little-endian and has no length prefix (the ByteArray wrapper strips it):
+Since `0.4.0` the OCTET_STRING value on the `Data`/`Discovery` attributes is the **same wrapped `ubabel_packet_t`** the LoRa side carries — a leading 2-byte big-endian `proto_id` (the `destProto` envelope, `htons(1000)`) followed by the packet body. The earlier `ubabel_zb_packet_t` (`id`/`val`/`payload_len`) wrapper was **scrapped** — it carried no useful information — so this driver no longer parses or serialises it; `ZigBeePacket` is now just a carrier for the raw bytes. Interpreting the envelope/body is the consumer's job (`babel-zigbee-protocol` strips the 2-byte `destProto`; the kind — DATA/DISCOVERY/… — is `ubabel_packet_t.type`).
 
-```c
-typedef struct __attribute__((packed)) {
-    uint16_t id;            // little-endian
-    uint16_t val;           // little-endian
-    uint8_t  payload_len;
-    uint8_t  payload[];     // UTF-8 string, payload_len bytes
-} ubabel_zb_packet_t;
-```
-
-These constants must stay in sync with `zigbee.h` on the ESP / Pico side.
+These constants must stay in sync with `zb_stack.h` on the ESP / Pico side.
 
 ---
 
@@ -107,7 +99,7 @@ Add to your `pom.xml`:
     <dependency>
         <groupId>pt.paradigmshift.iot</groupId>
         <artifactId>babel-zigbee</artifactId>
-        <version>0.2.0</version>
+        <version>0.4.0</version>
     </dependency>
 </dependencies>
 ```
@@ -126,9 +118,10 @@ ZigBeeConfig cfg = new ZigBeeConfig.Builder()
 ZigBeeCoordinator coord = new ZigBeeCoordinator(cfg);
 coord.setPacketHandler((ieee, packet) -> {
     // runs on the zsmartsystems command-listener thread; hand off to your own
-    // queue/loop if your handler is not thread-safe
-    System.out.printf("packet from %s: id=%d val=%d payload='%s'%n", ieee,
-            packet.getId(), packet.getVal(), packet.getPayloadAsString());
+    // queue/loop if your handler is not thread-safe. packet.getPayload() is the
+    // raw OCTET_STRING value — a wrapped ubabel_packet_t (destProto + body).
+    System.out.printf("packet from %s: %d bytes%n", ieee,
+            packet.getPayload().length);
 });
 coord.setHeartbeatHandler((ieee, counter) ->
         System.out.printf("heartbeat from %s: %d%n", ieee, counter));
@@ -137,7 +130,7 @@ coord.init();              // forms the network, registers listeners
 coord.permitJoin(254);     // open for joining (tighten in production)
 ```
 
-Per-device state — last id/val/payload + heartbeat counter — is also kept internally and reachable via `coord.getDeviceState(ieee)` and `coord.getKnownDevices()`. Higher-level integrations, such as a future `babel-zigbee-protocol` Babel protocol, will register their own handlers and queue packets out to a protocol thread.
+Per-device state — last payload + heartbeat counter — is also kept internally and reachable via `coord.getDeviceState(ieee)` and `coord.getKnownDevices()`. Higher-level integrations, such as the `babel-zigbee-protocol` Babel protocol, register their own handlers and queue packets out to a protocol thread.
 
 ### Sending packets back to a device
 
@@ -145,9 +138,7 @@ Sends are unicast and use the same vendor cluster + `Data` attribute. The call i
 
 ```java
 ZigBeePacket reply = new ZigBeePacket.Builder()
-        .id(42)
-        .val(0xABCD)
-        .payload("ack")
+        .payload("ack")   // bytes are written to the OCTET_STRING verbatim
         .build();
 
 Future<CommandResult> tx = coord.transmit(deviceIeee, reply);
@@ -156,7 +147,7 @@ Future<CommandResult> tx = coord.transmit(deviceIeee, reply);
 
 The destination must already be in `coord.getKnownDevices()` (i.e. the device has joined and its endpoint has been registered, either by the manual bring-up path or by ZDO discovery). If the node, endpoint, or cluster isn't present, `transmit` throws `IllegalStateException` with a descriptive message.
 
-**Payload size limit.** The ZBDongle-E ZCL transport caps the attribute value at 128 bytes. After 6 bytes of ZCL framing and 1 byte for the OCTET_STRING length prefix that leaves `ZigBeeCoordinator.MAX_PACKET_SIZE_BYTES = 121` bytes for the whole `ubabel_zb_packet_t`, i.e. `ZigBeeCoordinator.MAX_PAYLOAD_SIZE_BYTES = 116` bytes for the actual payload after the 5-byte header. `transmit(...)` throws `IllegalArgumentException` if you exceed this — same constraint the ESP firmware enforces on its outgoing path (`ubabel_zb_proto.h`).
+**Payload size limit.** The ZBDongle-E ZCL transport caps the attribute value at 128 bytes. After 6 bytes of ZCL framing and 1 byte for the OCTET_STRING length prefix that leaves `ZigBeeCoordinator.MAX_PACKET_SIZE_BYTES = 121` bytes for the OCTET_STRING value written on the wire — i.e. the whole wrapped `ubabel_packet_t` (`ZigBeeCoordinator.MAX_PAYLOAD_SIZE_BYTES = 116` is retained as the historical payload budget). `transmit(...)` throws `IllegalArgumentException` if `packet.getPayload()` exceeds the cap — same constraint the ESP firmware enforces on its outgoing path (`ubabel_zb_proto.h`, `ZB_MAX_PACKET_SIZE = 121`).
 
 ### NWK-layer broadcast
 
