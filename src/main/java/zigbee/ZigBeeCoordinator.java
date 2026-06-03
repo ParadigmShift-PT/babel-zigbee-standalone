@@ -296,7 +296,7 @@ public class ZigBeeCoordinator {
                     Integer.toHexString(UBABEL_CLUSTER_ID));
         }
 
-        byte[] wire = packet.toBytes();
+        byte[] wire = packet.getPayload();
         if (wire.length > MAX_PACKET_SIZE_BYTES) {
             throw new IllegalArgumentException(
                     "ZigBee packet too large for the ZBDongle-E transport: " +
@@ -361,7 +361,7 @@ public class ZigBeeCoordinator {
             throw new IllegalArgumentException("packet must not be null");
         }
 
-        byte[] wire = packet.toBytes();
+        byte[] wire = packet.getPayload();
         if (wire.length > MAX_PACKET_SIZE_BYTES) {
             throw new IllegalArgumentException(
                     "ZigBee packet too large for the ZBDongle-E transport: " +
@@ -660,7 +660,7 @@ public class ZigBeeCoordinator {
             switch (attrId) {
             case ATTR_DATA -> {
                 byte[] raw = ((ByteArray) record.getAttributeValue()).get();
-                handleDataPacket(raw, ieee);
+                handleWrappedPacket(raw, ieee);
             }
             case ATTR_HEARTBEAT -> {
                 int counter = ((Number) record.getAttributeValue()).intValue();
@@ -668,7 +668,7 @@ public class ZigBeeCoordinator {
             }
             case ATTR_DISCOVERY -> {
                 byte[] raw = ((ByteArray) record.getAttributeValue()).get();
-                handleDiscovery(raw, ieee);
+                handleWrappedPacket(raw, ieee);
             }
             // The µBabel ESP firmware also defines 0x0001 SENSOR_READING,
             // 0x0002 COMMAND, 0x0006 DISCOVERY_REQ on the same cluster.
@@ -685,19 +685,37 @@ public class ZigBeeCoordinator {
         }
     }
 
-    private void handleDataPacket(byte[] raw, IeeeAddress ieee) {
-        ZigBeePacket packet = ZigBeePacket.fromBytes(raw);
-        if (packet == null) {
-            System.err.printf(
-                    "Packet from %s: malformed (len=%d) — dropped%n", ieee,
-                    raw == null ? 0 : raw.length);
+    /**
+     * Surface a µBabel packet written to the vendor cluster — the {@code Data}
+     * attribute ({@link #ATTR_DATA}, 0x0003) and the {@code Discovery} attribute
+     * ({@link #ATTR_DISCOVERY}, 0x0005).
+     *
+     * <p>Since the 2026-06 µBabel revision the ZigBee end device writes the same
+     * wrapped form the LoRa side uses: the OCTET_STRING value is a
+     * {@code ubabel_packet_t} whose leading 2-byte {@code proto_id} is the
+     * destination-protocol-id envelope (big-endian; {@code htons(1000)} for the
+     * gateway's {@code SensorInboundProtocol}), followed by the packet body
+     * ({@code recipient}/{@code sender}/{@code message_id}/{@code type}/
+     * {@code payload_len}/{@code payload}). The message kind (DATA / DISCOVERY /
+     * …) now lives in the packet's {@code type} field, <em>not</em> in the ZCL
+     * attribute id — so both attributes are surfaced identically.
+     *
+     * <p>The bytes are surfaced verbatim as a {@link ZigBeePacket} payload
+     * ({@code id}/{@code val} left {@code 0}); the {@code babel-zigbee-protocol}
+     * bridge strips the 2-byte {@code destProto} envelope and routes the
+     * remainder, mirroring how the LoRa side surfaces a received frame. The
+     * obsolete {@code ubabel_zb_packet_t} ({@code id}/{@code val}/
+     * {@code payload_len}) framing is no longer parsed.
+     */
+    private void handleWrappedPacket(byte[] raw, IeeeAddress ieee) {
+        if (raw == null) {
+            System.err.printf("Packet from %s: null value — dropped%n", ieee);
             return;
         }
+        ZigBeePacket packet = new ZigBeePacket.Builder().payload(raw).build();
 
         DeviceState state =
                 deviceStates.computeIfAbsent(ieee, k -> new DeviceState());
-        state.lastId = packet.getId();
-        state.lastVal = packet.getVal();
         state.lastPayload = packet.getPayloadAsString();
 
         BiConsumer<IeeeAddress, ZigBeePacket> h = this.packetHandler;
@@ -709,40 +727,7 @@ public class ZigBeeCoordinator {
                 e.printStackTrace();
             }
         } else {
-            System.out.printf(
-                    "Packet from %s: id=%d val=%d payload='%s'%n", ieee,
-                    packet.getId(), packet.getVal(),
-                    packet.getPayloadAsString());
-        }
-    }
-
-    /**
-     * Handle a µBabel DISCOVERY attribute write ({@link #ATTR_DISCOVERY}, 0x0005).
-     * Unlike {@link #ATTR_DATA}, the OCTET_STRING value here is a bare µBabel
-     * discovery payload ({@code discovery_msg_t}), <em>not</em> a
-     * {@code ubabel_zb_packet_t} — so it is surfaced as a {@link ZigBeePacket}
-     * whose payload is the raw bytes (id/val left 0) via the same
-     * {@link #packetHandler} as data, mirroring how the LoRa side surfaces a
-     * received frame. (Caveat: like the current raw LoRa discovery, the bytes
-     * carry no leading destProto envelope, so higher layers see/log it but won't
-     * route it until µBabel emits the wrapped {@code ubabel_packet_t} form.)
-     */
-    private void handleDiscovery(byte[] raw, IeeeAddress ieee) {
-        if (raw == null) {
-            System.err.printf("Discovery from %s: null value — dropped%n", ieee);
-            return;
-        }
-        ZigBeePacket packet = new ZigBeePacket.Builder().payload(raw).build();
-        BiConsumer<IeeeAddress, ZigBeePacket> h = this.packetHandler;
-        if (h != null) {
-            try {
-                h.accept(ieee, packet);
-            } catch (Exception e) {
-                System.err.println("ZigBee discovery handler threw: " + e);
-                e.printStackTrace();
-            }
-        } else {
-            System.out.printf("Discovery from %s: %d bytes (no handler)%n",
+            System.out.printf("Packet from %s: %d bytes (no handler)%n",
                               ieee, raw.length);
         }
     }
@@ -782,23 +767,19 @@ public class ZigBeeCoordinator {
     // Per-device state
     // -------------------------------------------------------------------------
 
-    /** Last-known data and heartbeat counter reported by a given device. */
+    /** Last-known packet payload and heartbeat counter reported by a device. */
     public static class DeviceState {
-        private volatile int lastId;
-        private volatile int lastVal;
         private volatile String lastPayload = "";
         private volatile int heartbeatCounter;
 
-        public int getLastId() { return lastId; }
-        public int getLastVal() { return lastVal; }
         public String getLastPayload() { return lastPayload; }
         public int getHeartbeatCounter() { return heartbeatCounter; }
 
         @Override
         public String toString() {
             return String.format(
-                    "DeviceState[id=%d, val=%d, heartbeat=%d, payload='%s']",
-                    lastId, lastVal, heartbeatCounter, lastPayload);
+                    "DeviceState[heartbeat=%d, payload='%s']",
+                    heartbeatCounter, lastPayload);
         }
     }
 

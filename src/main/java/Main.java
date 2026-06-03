@@ -69,9 +69,8 @@ public class Main {
 
         ZigBeeCoordinator coordinator = new ZigBeeCoordinator(cfg);
         coordinator.setPacketHandler((ieee, packet) -> System.out.printf(
-                "Packet from %s: id=%d val=%d payload='%s'%n", ieee,
-                packet.getId(), packet.getVal(),
-                packet.getPayloadAsString()));
+                "Packet from %s: %d bytes [%s]%n", ieee,
+                packet.getPayload().length, packet));
         coordinator.setHeartbeatHandler((ieee, counter) -> System.out.printf(
                 "Heartbeat from %s: counter=%d%n", ieee, counter));
 
@@ -122,8 +121,6 @@ public class Main {
             seq++;
 
             ZigBeePacket pkt = new ZigBeePacket.Builder()
-                    .id(seq)
-                    .val(0xC0DE)
                     .payload("hello " + seq)
                     .build();
             try {

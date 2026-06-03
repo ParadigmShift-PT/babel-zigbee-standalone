@@ -6,7 +6,7 @@
 
     <groupId>pt.paradigmshift.iot</groupId>
     <artifactId>babel-zigbee</artifactId>
-    <version>0.3.0</version>
+    <version>0.4.0</version>
     <name>Babel ZigBee</name>
     <description>
         A Java ZigBee coordinator for Raspberry Pi gateways, built on the
