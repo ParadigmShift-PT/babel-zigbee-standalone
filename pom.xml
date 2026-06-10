@@ -6,16 +6,17 @@
 
     <groupId>pt.paradigmshift.iot</groupId>
     <artifactId>babel-zigbee</artifactId>
-    <version>0.4.0</version>
+    <version>0.5.0</version>
     <name>Babel ZigBee</name>
     <description>
         A Java ZigBee coordinator for Raspberry Pi gateways, built on the
         zsmartsystems ZigBee stack with an Ember (EZSP) USB dongle backend.
         Forms a ZigBee Home Automation network, registers a vendor-specific
         cluster (0xFF00), and routes µBabel packets exchanged with ESP32 /
-        Raspberry Pi Pico end devices via ZCL Write Attribute commands.
-        Intended to back a future Babel protocol providing ZigBee connectivity
-        to swarm-style applications running on Raspberry Pi gateways.
+        Raspberry Pi Pico end devices via ZCL cluster-specific custom
+        commands. Intended to back a future Babel protocol providing ZigBee
+        connectivity to swarm-style applications running on Raspberry Pi
+        gateways.
     </description>
     <url>https://www.paradigmshift.pt</url>
 

@@ -29,12 +29,11 @@ import com.zsmartsystems.zigbee.transport.TransportConfig;
 import com.zsmartsystems.zigbee.transport.TransportConfigOption;
 import com.zsmartsystems.zigbee.transport.TrustCentreJoinMode;
 import com.zsmartsystems.zigbee.transport.ZigBeePort.FlowControl;
-import com.zsmartsystems.zigbee.zcl.ZclAttribute;
 import com.zsmartsystems.zigbee.zcl.ZclCluster;
+import com.zsmartsystems.zigbee.zcl.ZclCommand;
 import com.zsmartsystems.zigbee.zcl.clusters.general.WriteAttributesCommand;
 import com.zsmartsystems.zigbee.zcl.field.ByteArray;
 import com.zsmartsystems.zigbee.zcl.field.WriteAttributeRecord;
-import com.zsmartsystems.zigbee.zcl.protocol.ZclDataType;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -55,20 +54,53 @@ import java.util.function.BiConsumer;
  * channel/PAN, registers the µBabel vendor cluster, and surfaces incoming
  * µBabel packets and heartbeats to caller-supplied handlers.
  *
+ * <h2>Wire contract (since 0.5.0 — must match the 2026-06 µBabel firmware)</h2>
+ * <ul>
+ *   <li><b>DATA and DISCOVERY are ZCL cluster-specific custom commands</b>
+ *   ({@link UbabelDataCommand} {@code 0x0003} / {@link UbabelDiscoveryCommand}
+ *   {@code 0x0005}) on cluster {@link #UBABEL_CLUSTER_ID 0xFF00}, HA profile,
+ *   direction CLIENT_TO_SERVER, <em>bidirectional</em> (both the ESP and this
+ *   coordinator send them). The single command field is an OCTET_STRING-typed
+ *   payload — {@code [len:u8][bytes...]} on the wire. The change exists so
+ *   the receiver learns the sender's short address (the ESP's write-attribute
+ *   callback carried no source address), letting µBabel key ZigBee
+ *   reassembly per sender.</li>
+ *   <li><b>HEARTBEAT is unchanged</b> — still a ZCL Write Attributes on
+ *   {@link #ATTR_HEARTBEAT 0x0004}. (The current µBabel firmware has no
+ *   heartbeat sender — {@code zb_send_heartbeat} was removed — so this RX
+ *   path is dormant until the firmware regains one.)</li>
+ *   <li><b>Legacy DATA/DISCOVERY attribute writes</b> ({@code 0x0003}/
+ *   {@code 0x0005}) are still accepted inbound for backward compatibility,
+ *   but pre-2026-06 firmware no longer parses them outbound — the coordinator
+ *   only ever transmits custom commands.</li>
+ * </ul>
+ *
  * <p>Wire constants ({@link #HA_PROFILE_ID}, the two endpoints, the cluster
- * id, the two attribute ids and the end-device ID configured via
+ * id, the command/attribute ids and the end-device ID configured via
  * {@link ZigBeeConfig.Builder#endDeviceId(int)} — default
- * {@link #DEFAULT_END_DEVICE_ID}) must stay in sync with {@code zigbee.h} on
- * the ESP / Pico side.
+ * {@link #DEFAULT_END_DEVICE_ID}) must stay in sync with
+ * {@code uBabel/components/zigbee/zb_stack.h} on the ESP / Pico side.
  */
 public class ZigBeeCoordinator {
 
     public static final int HA_PROFILE_ID = 0x0104;
     public static final int COORDINATOR_ENDPOINT = 1;
     public static final int END_DEVICE_ENDPOINT = 10;
+    /** µBabel vendor cluster ({@code UBABEL_CUSTOM_CLUSTER_ID} in
+     *  {@code zb_stack.h}). DATA/DISCOVERY custom commands and the HEARTBEAT
+     *  attribute all live on it. */
     public static final int UBABEL_CLUSTER_ID = 0xFF00;
+    /** DATA id ({@code 0x0003}). Primarily the custom-command id
+     *  ({@link UbabelDataCommand#COMMAND_ID}); doubles as the legacy DATA
+     *  attribute id still accepted inbound. */
     public static final int ATTR_DATA = 0x0003;
+    /** HEARTBEAT attribute (UINT16 counter) — the one µBabel value still
+     *  carried as a ZCL Write Attributes. Dormant on the firmware side (no
+     *  heartbeat sender at present), but the RX path stays wired. */
     public static final int ATTR_HEARTBEAT = 0x0004;
+    /** DISCOVERY id ({@code 0x0005}). Primarily the custom-command id
+     *  ({@link UbabelDiscoveryCommand#COMMAND_ID}); doubles as the legacy
+     *  DISCOVERY attribute id still accepted inbound. */
     public static final int ATTR_DISCOVERY = 0x0005;
 
     /** Max practical join-window duration (s). ZigBee 3.0 deprecated 0xFF "permanent". */
@@ -81,12 +113,14 @@ public class ZigBeeCoordinator {
     public static final int DEFAULT_END_DEVICE_ID = 0xFFF2;
 
     /** Maximum on-the-wire size of the OCTET_STRING value (a wrapped
-     *  {@code ubabel_packet_t}) carried in the {@code Data} attribute. The
-     *  ZBDongle-E ZCL transport caps the attribute value at 128 bytes;
-     *  subtracting 6 bytes of ZCL framing overhead and 1 byte for the
-     *  OCTET_STRING length prefix leaves 121 bytes for the value (see
-     *  {@code ZB_MAX_PACKET_SIZE} in {@code ubabel_zb_proto.h} on the µBabel
-     *  side). {@link #transmit} enforces this against {@code packet.getPayload()}. */
+     *  {@code ubabel_packet_t} or fragment frame) carried in the µBabel
+     *  DATA/DISCOVERY custom command. The ZBDongle-E ZCL transport caps the
+     *  value at 128 bytes; subtracting 6 bytes of ZCL framing overhead and
+     *  1 byte for the OCTET_STRING length prefix leaves 121 bytes for the
+     *  raw value (see {@code ZB_MAX_PACKET_SIZE} in {@code ubabel_zb_proto.h}
+     *  on the µBabel side — the firmware enforces the same cap on its
+     *  outgoing path). {@link #transmit} enforces this against
+     *  {@code packet.getPayload()}. */
     public static final int MAX_PACKET_SIZE_BYTES = 121;
 
     /** Historical payload budget — {@link #MAX_PACKET_SIZE_BYTES} minus the
@@ -193,6 +227,14 @@ public class ZigBeeCoordinator {
             throw new IllegalStateException(
                     "Coordinator node never registered after startup");
         }
+
+        // Make sure every node already present in the node table (e.g.
+        // restored from a persistent data store, or added before the
+        // listeners were registered) carries the command-aware µBabel
+        // cluster — newly appearing nodes are covered by the node listener.
+        for (ZigBeeNode node : manager.getNodes()) {
+            attachUbabelClusters(node);
+        }
     }
 
     /**
@@ -240,24 +282,32 @@ public class ZigBeeCoordinator {
     }
 
     /**
-     * Sends a µBabel packet to the named end device by issuing a ZCL Write
-     * Attributes against the {@code Data} attribute ({@link #ATTR_DATA}) of
-     * the µBabel cluster on the end device's {@link #END_DEVICE_ENDPOINT}.
+     * Sends a µBabel packet to the named end device as a µBabel DATA custom
+     * command ({@link UbabelDataCommand}, id {@code 0x0003}) on the µBabel
+     * cluster of the end device's {@link #END_DEVICE_ENDPOINT}. The packet
+     * bytes ride as the command's OCTET_STRING payload
+     * ({@code [len:u8][bytes...]} on the wire) — the form the 2026-06 µBabel
+     * firmware's {@code zb_custom_cmd_handler} expects (it no longer parses
+     * attribute writes for DATA).
      *
      * <p>The destination node must already be known to the coordinator
      * (either via the manual bring-up path or via ZDO-driven discovery) and
-     * must expose endpoint {@value #END_DEVICE_ENDPOINT} with cluster
-     * {@value #UBABEL_CLUSTER_ID}. Throws {@link IllegalStateException} with
-     * a descriptive message otherwise — call {@link #getKnownDevices()} to
-     * check membership beforehand.
+     * must expose endpoint {@value #END_DEVICE_ENDPOINT}. Throws
+     * {@link IllegalStateException} with a descriptive message otherwise —
+     * call {@link #getKnownDevices()} to check membership beforehand. The
+     * command-aware {@link UbabelZclCluster} is attached on demand if the
+     * endpoint does not carry it yet.
      *
-     * <p>The returned {@link Future} completes asynchronously when the
-     * end device acknowledges (or the transaction times out at the ZCL
-     * layer). Callers may ignore the future for fire-and-forget semantics.
+     * <p>The returned {@link Future} completes asynchronously when the end
+     * device's ZCL Default Response arrives (the command does not disable the
+     * default response, so it doubles as the delivery acknowledgement —
+     * mirroring the Write Attributes Response of the pre-0.5.0 transport) or
+     * when the transaction times out at the ZCL layer. Callers may ignore the
+     * future for fire-and-forget semantics.
      *
      * @param destination the IEEE address of the target end device
      * @param packet      the µBabel packet to send; its byte form is wrapped
-     *                    in a ZCL {@code ByteArray} as the attribute value
+     *                    in a ZCL {@code ByteArray} as the command payload
      * @return a future that completes with the ZCL transaction result
      */
     public Future<CommandResult> transmit(IeeeAddress destination,
@@ -284,19 +334,23 @@ public class ZigBeeCoordinator {
                     "Node " + destination + " has no endpoint " +
                     END_DEVICE_ENDPOINT);
         }
-        // The end-device hosts the attribute on its server side; from the
-        // coordinator's view that's an input cluster. Fall back to the output
-        // cluster in case the device descriptor advertised the cluster in the
-        // client direction only.
+        // Idempotent — replaces any auto-instantiated ZclCustomCluster shell
+        // with the command-aware µBabel cluster if a discovery race got here
+        // first.
+        attachUbabelClusters(ep);
+        // Send through the *input*-cluster instance: it keeps the server-side
+        // flag, so ZclCluster.sendCommand leaves the command direction at
+        // CLIENT_TO_SERVER — the direction the ESP firmware accepts.
         ZclCluster cluster = ep.getInputCluster(UBABEL_CLUSTER_ID);
-        if (cluster == null) {
-            cluster = ep.getOutputCluster(UBABEL_CLUSTER_ID);
-        }
-        if (cluster == null) {
+        if (!(cluster instanceof UbabelZclCluster ubabelCluster)) {
             throw new IllegalStateException(
                     "Node " + destination + " endpoint " + END_DEVICE_ENDPOINT +
-                    " has no cluster 0x" +
-                    Integer.toHexString(UBABEL_CLUSTER_ID));
+                    " has no µBabel cluster 0x" +
+                    Integer.toHexString(UBABEL_CLUSTER_ID) +
+                    " (found " +
+                    (cluster == null ? "none"
+                                     : cluster.getClass().getSimpleName()) +
+                    ")");
         }
 
         byte[] wire = packet.getPayload();
@@ -307,16 +361,15 @@ public class ZigBeeCoordinator {
                     MAX_PACKET_SIZE_BYTES + " — i.e. " +
                     MAX_PAYLOAD_SIZE_BYTES + " bytes of payload)");
         }
-        return cluster.writeAttribute(ATTR_DATA, ZclDataType.OCTET_STRING,
-                                      new ByteArray(wire));
+        return ubabelCluster.sendData(new ByteArray(wire));
     }
 
     /**
      * NWK-layer broadcast of a {@link ZigBeePacket} to every joined node in
-     * one-hop reach. The packet is delivered to the µBabel cluster's
-     * {@code Data} attribute ({@link #ATTR_DATA}) on
-     * {@link #END_DEVICE_ENDPOINT} of every recipient. Convenience overload
-     * targeting {@link ZigBeeBroadcastDestination#BROADCAST_ALL_DEVICES}.
+     * one-hop reach. The packet is delivered as a µBabel DATA custom command
+     * ({@link UbabelDataCommand}) on {@link #END_DEVICE_ENDPOINT} of every
+     * recipient. Convenience overload targeting
+     * {@link ZigBeeBroadcastDestination#BROADCAST_ALL_DEVICES}.
      *
      * <p>Broadcast caveats:
      * <ul>
@@ -373,21 +426,18 @@ public class ZigBeeCoordinator {
                     MAX_PAYLOAD_SIZE_BYTES + " bytes of payload)");
         }
 
-        // ZclCluster.writeAttribute() is unicast-only (it resolves a remote
-        // endpoint+cluster pair on a known node), so we construct the ZCL
-        // Write Attributes command manually and dispatch it through
-        // sendCommand() with a broadcast NWK destination. Broadcasts are
-        // unacknowledged at the NWK layer — no transaction to track.
-        WriteAttributeRecord record = new WriteAttributeRecord();
-        record.setAttributeIdentifier(ATTR_DATA);
-        record.setAttributeDataType(ZclDataType.OCTET_STRING);
-        record.setAttributeValue(new ByteArray(wire));
-
-        WriteAttributesCommand cmd = new WriteAttributesCommand();
-        cmd.setClusterId(UBABEL_CLUSTER_ID);
-        cmd.setRecords(Collections.singletonList(record));
+        // The cluster-level send path is unicast-only (it resolves a remote
+        // endpoint+cluster pair on a known node), so we construct the µBabel
+        // DATA custom command manually and dispatch it through the manager's
+        // sendCommand() with a broadcast NWK destination — the same mechanism
+        // the pre-0.5.0 hand-built WriteAttributesCommand used. Broadcasts
+        // are unacknowledged at the NWK layer (no transaction to track), so
+        // the default response is disabled: a response storm from every
+        // recipient would serve nothing.
+        UbabelDataCommand cmd = new UbabelDataCommand(new ByteArray(wire));
         cmd.setDestinationAddress(
                 new ZigBeeEndpointAddress(scope.getKey(), END_DEVICE_ENDPOINT));
+        cmd.setDisableDefaultResponse(true);
 
         return manager.sendCommand(cmd);
     }
@@ -552,6 +602,11 @@ public class ZigBeeCoordinator {
             @Override
             public void nodeAdded(ZigBeeNode node) {
                 System.out.println("Node added: " + node.getIeeeAddress());
+                // Idempotent; covers nodes that arrive with endpoints already
+                // populated (e.g. restored from a data store). The manual
+                // bring-up registrations below attach on the endpoints they
+                // create themselves.
+                attachUbabelClusters(node);
                 if (node.getIeeeAddress().equals(coordinatorIeee)) {
                     if (cfg.useManualBringup) {
                         registerCoordinatorEndpoint(node);
@@ -563,6 +618,11 @@ public class ZigBeeCoordinator {
 
             @Override
             public void nodeUpdated(ZigBeeNode node) {
+                // ZDO-driven discovery (useManualBringup=false) populates
+                // endpoints asynchronously — swap any auto-instantiated
+                // ZclCustomCluster shells for the command-aware µBabel
+                // cluster as soon as the endpoints appear. Idempotent.
+                attachUbabelClusters(node);
                 if (!deviceStates.containsKey(node.getIeeeAddress()) &&
                     node.getEndpoint(END_DEVICE_ENDPOINT) != null) {
                     System.out.println(
@@ -578,16 +638,22 @@ public class ZigBeeCoordinator {
             }
         });
 
-        // Global command listener — intercepts WriteAttributesCommand directly
+        // Global command listener — intercepts the parsed commands directly
         // because the coordinator node's NWK address isn't populated by the
-        // stack, which breaks cluster-level dispatch.
+        // stack, which breaks cluster-level dispatch. The µBabel custom
+        // commands (DATA 0x0003 / DISCOVERY 0x0005) are the primary inbound
+        // path since the 2026-06 firmware; WriteAttributesCommand remains for
+        // the HEARTBEAT attribute (0x0004) and for legacy DATA/DISCOVERY
+        // writes from pre-2026-06 firmware.
         manager.addCommandListener(command -> {
-            if (!(command instanceof WriteAttributesCommand))
-                return;
-            WriteAttributesCommand writeCmd = (WriteAttributesCommand) command;
-            if (writeCmd.getClusterId() != UBABEL_CLUSTER_ID)
-                return;
-            handleWriteAttributes(writeCmd);
+            if (command instanceof UbabelDataCommand dataCmd) {
+                handleUbabelCommand(dataCmd, dataCmd.getPayload());
+            } else if (command instanceof UbabelDiscoveryCommand discoveryCmd) {
+                handleUbabelCommand(discoveryCmd, discoveryCmd.getPayload());
+            } else if (command instanceof WriteAttributesCommand writeCmd
+                       && writeCmd.getClusterId() == UBABEL_CLUSTER_ID) {
+                handleWriteAttributes(writeCmd);
+            }
         });
     }
 
@@ -595,6 +661,12 @@ public class ZigBeeCoordinator {
     // Endpoint registration
     // -------------------------------------------------------------------------
 
+    /**
+     * Manually registers the coordinator's own endpoint
+     * ({@value #COORDINATOR_ENDPOINT}) carrying the µBabel cluster. Used on
+     * the manual bring-up path ({@code useManualBringup=true}) so the local
+     * node mirrors the endpoint layout the ESP firmware expects to see.
+     */
     private void registerCoordinatorEndpoint(ZigBeeNode node) {
         if (node.getEndpoint(COORDINATOR_ENDPOINT) != null)
             return;
@@ -602,18 +674,20 @@ public class ZigBeeCoordinator {
         ZigBeeEndpoint ep = new ZigBeeEndpoint(node, COORDINATOR_ENDPOINT);
         ep.setProfileId(HA_PROFILE_ID);
         ep.setDeviceId(0x0000);
-
-        ZclCluster cluster =
-                new ZclCluster(ep, UBABEL_CLUSTER_ID, "uBabel") {};
-        cluster.addLocalAttributes(ubabelAttributes(cluster));
-        ep.addInputCluster(cluster);
-        ep.addOutputCluster(cluster);
+        attachUbabelClusters(ep);
         node.addEndpoint(ep);
 
         System.out.println(
                 "Coordinator endpoint registered: " + node.getIeeeAddress());
     }
 
+    /**
+     * Manually registers a joined end device's endpoint
+     * ({@value #END_DEVICE_ENDPOINT}) carrying the µBabel cluster. Used on
+     * the manual bring-up path when a device announces itself but ZDO
+     * discovery does not populate the node (see
+     * {@link ZigBeeConfig.Builder#useManualBringup(boolean)}).
+     */
     private void registerEndDeviceEndpoint(ZigBeeNode node) {
         if (node.getEndpoint(END_DEVICE_ENDPOINT) != null)
             return;
@@ -621,31 +695,114 @@ public class ZigBeeCoordinator {
         ZigBeeEndpoint ep = new ZigBeeEndpoint(node, END_DEVICE_ENDPOINT);
         ep.setProfileId(HA_PROFILE_ID);
         ep.setDeviceId(cfg.endDeviceId);
-
-        ZclCluster cluster =
-                new ZclCluster(ep, UBABEL_CLUSTER_ID, "uBabel") {};
-        cluster.addAttributes(ubabelAttributes(cluster));
-        ep.addInputCluster(cluster);
-        ep.addOutputCluster(cluster);
+        attachUbabelClusters(ep);
         node.addEndpoint(ep);
 
         System.out.println(
                 "End device endpoint registered: " + node.getIeeeAddress());
     }
 
-    private static Set<ZclAttribute> ubabelAttributes(ZclCluster cluster) {
-        return Set.of(
-                new ZclAttribute(cluster, ATTR_DATA, "Data",
-                                 ZclDataType.OCTET_STRING, false, true,
-                                 true, false),
-                new ZclAttribute(cluster, ATTR_HEARTBEAT, "Heartbeat",
-                                 ZclDataType.UNSIGNED_16_BIT_INTEGER,
-                                 false, true, true, false));
+    /**
+     * Ensures every endpoint of the given node carries the command-aware
+     * µBabel cluster ({@link UbabelZclCluster}) — see the
+     * {@link #attachUbabelClusters(ZigBeeEndpoint) endpoint overload} for
+     * why this is required. Safe to call repeatedly and from the stack's
+     * listener threads.
+     */
+    private void attachUbabelClusters(ZigBeeNode node) {
+        for (ZigBeeEndpoint ep : node.getEndpoints()) {
+            attachUbabelClusters(ep);
+        }
+    }
+
+    /**
+     * Ensures the given endpoint carries a {@link UbabelZclCluster} as both
+     * its input and its output cluster {@value #UBABEL_CLUSTER_ID}.
+     *
+     * <p>This is what makes the inbound custom-command path work at all: the
+     * zsmartsystems receive pipeline resolves an incoming cluster-specific
+     * frame against the <em>sender</em> endpoint's cluster instance
+     * (CLIENT_TO_SERVER → {@code getOutputCluster(...).getCommandFromId(...)},
+     * SERVER_TO_CLIENT → {@code getInputCluster(...).getResponseFromId(...)}),
+     * and the placeholder the stack auto-instantiates for unknown clusters
+     * ({@code ZclCustomCluster}) has <em>empty</em> command maps — every
+     * µBabel command frame would be dropped with a FAILURE default response.
+     * Replacing the placeholder is the supported extension point:
+     * {@code ZigBeeEndpoint.addInputCluster}/{@code addOutputCluster}
+     * deliberately replace an existing instance when it is a
+     * {@code ZclCustomCluster}.
+     *
+     * <p>Two <em>separate</em> instances are registered because
+     * {@code addOutputCluster} flags its instance client-side, which would
+     * make {@code ZclCluster.sendCommand} rewrite the TX direction to
+     * SERVER_TO_CLIENT; the input-side (server) instance is the one
+     * {@link #transmit(IeeeAddress, ZigBeePacket)} sends through.
+     *
+     * <p>Idempotent — endpoints already carrying {@link UbabelZclCluster}
+     * instances are left untouched. A failed replacement (an unexpected
+     * non-replaceable cluster instance already present) is loudly logged
+     * rather than thrown, since this runs on stack listener threads.
+     */
+    private void attachUbabelClusters(ZigBeeEndpoint ep) {
+        if (!(ep.getInputCluster(UBABEL_CLUSTER_ID) instanceof UbabelZclCluster)
+                && !ep.addInputCluster(new UbabelZclCluster(ep))) {
+            System.err.printf(
+                    "Could not attach µBabel input cluster on %s endpoint %d " +
+                    "(non-replaceable %s already present)%n",
+                    ep.getIeeeAddress(), ep.getEndpointId(),
+                    ep.getInputCluster(UBABEL_CLUSTER_ID)
+                            .getClass().getSimpleName());
+        }
+        if (!(ep.getOutputCluster(UBABEL_CLUSTER_ID) instanceof UbabelZclCluster)
+                && !ep.addOutputCluster(new UbabelZclCluster(ep))) {
+            System.err.printf(
+                    "Could not attach µBabel output cluster on %s endpoint %d " +
+                    "(non-replaceable %s already present)%n",
+                    ep.getIeeeAddress(), ep.getEndpointId(),
+                    ep.getOutputCluster(UBABEL_CLUSTER_ID)
+                            .getClass().getSimpleName());
+        }
     }
 
     // -------------------------------------------------------------------------
     // Packet handling
     // -------------------------------------------------------------------------
+
+    /**
+     * Inbound path for the µBabel custom commands ({@link UbabelDataCommand}
+     * DATA {@code 0x0003} / {@link UbabelDiscoveryCommand} DISCOVERY
+     * {@code 0x0005}) — the primary sensor traffic since the 2026-06 µBabel
+     * firmware. Resolves the sender's IEEE address from the command's source
+     * NWK address (the same lookup {@link #handleWriteAttributes} performs)
+     * and feeds the raw OCTET_STRING payload into
+     * {@link #handleWrappedPacket}, so custom commands and legacy attribute
+     * writes surface identically through the public
+     * {@code BiConsumer<IeeeAddress, ZigBeePacket>} handler.
+     *
+     * <p>The message kind (DATA / DISCOVERY / …) lives in the carried
+     * {@code ubabel_packet_t.type} field, not in the ZCL command id, so both
+     * commands are dispatched identically — mirroring how the two legacy
+     * attributes were handled.
+     *
+     * @param cmd     the parsed µBabel command (used for sender resolution
+     *                and diagnostics)
+     * @param payload the command's OCTET_STRING payload — the raw wrapped
+     *                {@code ubabel_packet_t} or fragment frame bytes (length
+     *                prefix already stripped by the codec)
+     */
+    private void handleUbabelCommand(ZclCommand cmd, ByteArray payload) {
+        ZigBeeNode sourceNode =
+                manager.getNode(cmd.getSourceAddress().getAddress());
+        if (sourceNode == null) {
+            System.err.printf(
+                    "%s from unknown source NWK=0x%04X — dropped%n",
+                    cmd.getClass().getSimpleName(),
+                    cmd.getSourceAddress().getAddress());
+            return;
+        }
+        handleWrappedPacket(payload == null ? null : payload.get(),
+                            sourceNode.getIeeeAddress());
+    }
 
     private void handleWriteAttributes(WriteAttributesCommand cmd) {
         ZigBeeNode sourceNode =
@@ -689,26 +846,27 @@ public class ZigBeeCoordinator {
     }
 
     /**
-     * Surface a µBabel packet written to the vendor cluster — the {@code Data}
-     * attribute ({@link #ATTR_DATA}, 0x0003) and the {@code Discovery} attribute
-     * ({@link #ATTR_DISCOVERY}, 0x0005).
+     * Surfaces a µBabel packet received on the vendor cluster — regardless of
+     * which ingress carried it: a DATA/DISCOVERY custom command (the primary
+     * path since 0.5.0, via {@link #handleUbabelCommand}) or a legacy
+     * DATA/DISCOVERY attribute write (via {@link #handleWriteAttributes}).
      *
-     * <p>Since the 2026-06 µBabel revision the ZigBee end device writes the same
-     * wrapped form the LoRa side uses: the OCTET_STRING value is a
-     * {@code ubabel_packet_t} whose leading 2-byte {@code proto_id} is the
+     * <p>The OCTET_STRING value is the same wrapped form the LoRa side uses:
+     * a {@code ubabel_packet_t} whose leading 2-byte {@code proto_id} is the
      * destination-protocol-id envelope (big-endian; {@code htons(1000)} for the
      * gateway's {@code SensorInboundProtocol}), followed by the packet body
      * ({@code recipient}/{@code sender}/{@code message_id}/{@code type}/
-     * {@code payload_len}/{@code payload}). The message kind (DATA / DISCOVERY /
-     * …) now lives in the packet's {@code type} field, <em>not</em> in the ZCL
-     * attribute id — so both attributes are surfaced identically.
+     * {@code payload_len}/{@code payload}) — or a fragment frame of one. The
+     * message kind (DATA / DISCOVERY / …) lives in the packet's {@code type}
+     * field, <em>not</em> in the ZCL command/attribute id — which is why every
+     * ingress is surfaced identically.
      *
-     * <p>The bytes are surfaced verbatim as a {@link ZigBeePacket} payload
-     * ({@code id}/{@code val} left {@code 0}); the {@code babel-zigbee-protocol}
-     * bridge strips the 2-byte {@code destProto} envelope and routes the
-     * remainder, mirroring how the LoRa side surfaces a received frame. The
-     * obsolete {@code ubabel_zb_packet_t} ({@code id}/{@code val}/
-     * {@code payload_len}) framing is no longer parsed.
+     * <p>The bytes are surfaced verbatim as a {@link ZigBeePacket} payload;
+     * the {@code babel-zigbee-protocol} bridge strips the 2-byte
+     * {@code destProto} envelope and routes the remainder, mirroring how the
+     * LoRa side surfaces a received frame. The obsolete
+     * {@code ubabel_zb_packet_t} ({@code id}/{@code val}/{@code payload_len})
+     * framing is no longer parsed.
      */
     private void handleWrappedPacket(byte[] raw, IeeeAddress ieee) {
         if (raw == null) {
