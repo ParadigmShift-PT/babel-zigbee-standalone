@@ -6,7 +6,7 @@ The artifact is intended to back a future Babel protocol providing ZigBee connec
 
 **Group ID:** `pt.paradigmshift.iot`
 **Artifact ID:** `babel-zigbee`
-**Current version:** `0.5.0`
+**Current version:** `0.6.0`
 **Tested on:** Raspberry Pi 4 / 5 (and macOS for development) with a Silicon Labs Ember EZSP USB dongle.
 
 ---

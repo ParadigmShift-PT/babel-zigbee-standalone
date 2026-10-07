@@ -14,6 +14,10 @@ import com.zsmartsystems.zigbee.ZigBeeNode;
 import com.zsmartsystems.zigbee.ZigBeeNodeStatus;
 import com.zsmartsystems.zigbee.ZigBeeStatus;
 import com.zsmartsystems.zigbee.app.basic.ZigBeeBasicServerExtension;
+import com.zsmartsystems.zigbee.app.otaserver.ZclOtaUpgradeServer;
+import com.zsmartsystems.zigbee.app.otaserver.ZigBeeOtaFile;
+import com.zsmartsystems.zigbee.app.otaserver.ZigBeeOtaServerStatus;
+import com.zsmartsystems.zigbee.app.otaserver.ZigBeeOtaStatusCallback;
 import com.zsmartsystems.zigbee.database.ZigBeeNetworkDataStore;
 import com.zsmartsystems.zigbee.database.ZigBeeNodeDao;
 import com.zsmartsystems.zigbee.dongle.ember.EmberNcp;
@@ -31,7 +35,11 @@ import com.zsmartsystems.zigbee.transport.TrustCentreJoinMode;
 import com.zsmartsystems.zigbee.transport.ZigBeePort.FlowControl;
 import com.zsmartsystems.zigbee.zcl.ZclCluster;
 import com.zsmartsystems.zigbee.zcl.ZclCommand;
+import com.zsmartsystems.zigbee.zcl.clusters.ZclOtaUpgradeCluster;
 import com.zsmartsystems.zigbee.zcl.clusters.general.WriteAttributesCommand;
+import com.zsmartsystems.zigbee.zcl.clusters.otaupgrade.ImageBlockCommand;
+import com.zsmartsystems.zigbee.zcl.clusters.otaupgrade.ImageNotifyCommand;
+import com.zsmartsystems.zigbee.zcl.clusters.otaupgrade.QueryNextImageCommand;
 import com.zsmartsystems.zigbee.zcl.field.ByteArray;
 import com.zsmartsystems.zigbee.zcl.field.WriteAttributeRecord;
 import java.util.ArrayList;
@@ -46,6 +54,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 /**
@@ -129,6 +138,17 @@ public class ZigBeeCoordinator {
      *  cap actually enforced on the wire is {@link #MAX_PACKET_SIZE_BYTES}. */
     public static final int MAX_PAYLOAD_SIZE_BYTES = MAX_PACKET_SIZE_BYTES - 5;
 
+    public static final int OTA_CLUSTER_ID = ZclOtaUpgradeCluster.CLUSTER_ID;
+    private static final int OTA_QUERY_JITTER = 100;
+    private static final long OTA_TRANSFER_TIMEOUT_MS = 60_000;
+    private static final int OTA_BLOCK_FIELD_IEEE = 0x01;
+    private static final int OTA_BLOCK_SIZE = 117;
+
+    public interface OtaStatusListener {
+        void onOtaStatus(IeeeAddress ieee, ZigBeeOtaServerStatus status,
+                         int percent);
+    }
+
     private final ZigBeeConfig cfg;
 
     private ZigBeeSerialPort port;
@@ -141,6 +161,14 @@ public class ZigBeeCoordinator {
 
     private volatile BiConsumer<IeeeAddress, ZigBeePacket> packetHandler;
     private volatile BiConsumer<IeeeAddress, Integer> heartbeatHandler;
+
+    private final Map<Integer, ZigBeeOtaFile> otaImages =
+            new ConcurrentHashMap<>();
+    private final AtomicReference<IeeeAddress> otaActive =
+            new AtomicReference<>();
+    private volatile OtaStatusListener otaStatusListener;
+    private volatile long otaStartNanos;
+    private volatile int otaSize;
 
     /** Daemon scheduler that keeps the join window open for {@link #permitJoinPermanently()}; null until enabled. */
     private ScheduledExecutorService permitJoinScheduler;
@@ -480,6 +508,54 @@ public class ZigBeeCoordinator {
         this.heartbeatHandler = handler;
     }
 
+    public void setOtaImages(Collection<ZigBeeOtaFile> images) {
+        otaImages.clear();
+        for (ZigBeeOtaFile image : images) {
+            otaImages.put(otaKey(image.getManufacturerCode(),
+                                 image.getImageType()), image);
+        }
+    }
+
+    public void setOtaStatusListener(OtaStatusListener listener) {
+        this.otaStatusListener = listener;
+    }
+
+    public IeeeAddress getOtaActive() { return otaActive.get(); }
+
+    public boolean notifyOta(IeeeAddress ieee) {
+        if (manager == null) {
+            throw new IllegalStateException("init() must be called first");
+        }
+        ZigBeeNode node = manager.getNode(ieee);
+        ZigBeeEndpoint ep =
+                node == null ? null : node.getEndpoint(END_DEVICE_ENDPOINT);
+        if (ep == null) {
+            return false;
+        }
+        attachOtaServer(ep);
+        if (!(ep.getOutputCluster(OTA_CLUSTER_ID)
+                instanceof ZclOtaUpgradeCluster cluster)) {
+            return false;
+        }
+        ImageNotifyCommand notify =
+                new ImageNotifyCommand(0, OTA_QUERY_JITTER, null, null, null);
+        notify.setDisableDefaultResponse(true);
+        cluster.sendCommand(notify);
+        System.out.printf("OTA %s notify%n", ieee);
+        return true;
+    }
+
+    public void notifyOtaAll() {
+        if (otaActive.get() != null) {
+            return;
+        }
+        for (ZigBeeNode node : manager.getNodes()) {
+            if (!node.getIeeeAddress().equals(coordinatorIeee)) {
+                notifyOta(node.getIeeeAddress());
+            }
+        }
+    }
+
     public ZigBeeConfig getConfig() { return cfg; }
 
     public IeeeAddress getCoordinatorIeee() { return coordinatorIeee; }
@@ -527,12 +603,15 @@ public class ZigBeeCoordinator {
         config.addOption(TransportConfigOption.TRUST_CENTRE_JOIN_MODE,
                          TrustCentreJoinMode.TC_JOIN_INSECURE);
 
-        Collection<Integer> clusters = new ArrayList<>();
-        clusters.add(UBABEL_CLUSTER_ID);
+        Collection<Integer> inputClusters = new ArrayList<>();
+        inputClusters.add(UBABEL_CLUSTER_ID);
+        inputClusters.add(OTA_CLUSTER_ID);
+        Collection<Integer> outputClusters = new ArrayList<>();
+        outputClusters.add(UBABEL_CLUSTER_ID);
         config.addOption(TransportConfigOption.SUPPORTED_INPUT_CLUSTERS,
-                         clusters);
+                         inputClusters);
         config.addOption(TransportConfigOption.SUPPORTED_OUTPUT_CLUSTERS,
-                         clusters);
+                         outputClusters);
         dongle.updateTransportConfig(config);
 
         EmberNcp ncp = dongle.getEmberNcp();
@@ -569,6 +648,7 @@ public class ZigBeeCoordinator {
         // coordinator's endpoint descriptor sent during ZDO exchanges.
         manager.addSupportedClientCluster(UBABEL_CLUSTER_ID);
         manager.addSupportedServerCluster(UBABEL_CLUSTER_ID);
+        manager.addSupportedServerCluster(OTA_CLUSTER_ID);
     }
 
     private void registerListeners() {
@@ -762,6 +842,131 @@ public class ZigBeeCoordinator {
                     ep.getOutputCluster(UBABEL_CLUSTER_ID)
                             .getClass().getSimpleName());
         }
+        attachOtaServer(ep);
+    }
+
+    private void attachOtaServer(ZigBeeEndpoint ep) {
+        if (ep.getEndpointId() != END_DEVICE_ENDPOINT
+                || ep.getApplication(OTA_CLUSTER_ID) != null) {
+            return;
+        }
+        if (!(ep.getOutputCluster(OTA_CLUSTER_ID) instanceof ZclOtaUpgradeCluster)
+                && !ep.addOutputCluster(new ZclOtaUpgradeCluster(ep))) {
+            System.err.printf(
+                    "Could not attach OTA client cluster on %s endpoint %d%n",
+                    ep.getIeeeAddress(), ep.getEndpointId());
+            return;
+        }
+
+        IeeeAddress ieee = ep.getIeeeAddress();
+        ZclOtaUpgradeServer server = new ZclOtaUpgradeServer() {
+            @Override
+            @SuppressWarnings("deprecation")
+            public boolean commandReceived(ZclCommand command) {
+                if (command instanceof ImageBlockCommand block
+                        && (block.getFieldControl() & OTA_BLOCK_FIELD_IEEE) != 0) {
+                    block.setFieldControl(
+                            block.getFieldControl() & ~OTA_BLOCK_FIELD_IEEE);
+                }
+                return super.commandReceived(command);
+            }
+        };
+        server.setTransferTimeoutPeriod(OTA_TRANSFER_TIMEOUT_MS);
+        server.setDataSize(OTA_BLOCK_SIZE);
+        server.addListener(new ZigBeeOtaStatusCallback() {
+            @Override
+            public void otaStatusUpdate(ZigBeeOtaServerStatus status,
+                                        int percent) {
+                onOtaStatus(ieee, server, status, percent);
+            }
+
+            @Override
+            public ZigBeeOtaFile otaIncomingRequest(
+                    QueryNextImageCommand command) {
+                return pickOtaImage(ieee, command);
+            }
+        });
+
+        ZigBeeStatus status = ep.addApplication(server);
+        if (status != ZigBeeStatus.SUCCESS) {
+            System.err.printf("Could not start OTA server on %s: %s%n", ieee,
+                              status);
+        }
+    }
+
+    private ZigBeeOtaFile pickOtaImage(IeeeAddress ieee,
+                                       QueryNextImageCommand command) {
+        ZigBeeOtaFile image = otaImages.get(
+                otaKey(command.getManufacturerCode(), command.getImageType()));
+        if (image == null) {
+            System.out.printf("OTA %s skip reason=no-image manufacturer=0x%04X "
+                              + "type=0x%04X%n", ieee,
+                              command.getManufacturerCode(),
+                              command.getImageType());
+            return null;
+        }
+        if (image.getFileVersion().equals(command.getFileVersion())) {
+            System.out.printf("OTA %s skip reason=up-to-date version=%08X%n",
+                              ieee, command.getFileVersion());
+            return null;
+        }
+        if (!otaActive.compareAndSet(null, ieee)
+                && !ieee.equals(otaActive.get())) {
+            System.out.printf("OTA %s skip reason=busy active=%s%n", ieee,
+                              otaActive.get());
+            return null;
+        }
+        otaStartNanos = System.nanoTime();
+        otaSize = image.getImageSize();
+        System.out.printf("OTA %s offer version=%08X running=%08X size=%d%n",
+                          ieee, image.getFileVersion(),
+                          command.getFileVersion(), image.getImageSize());
+        return image;
+    }
+
+    private void onOtaStatus(IeeeAddress ieee, ZclOtaUpgradeServer server,
+                             ZigBeeOtaServerStatus status, int percent) {
+        switch (status) {
+        case OTA_UPGRADE_COMPLETE, OTA_UPGRADE_FAILED, OTA_CANCELLED -> {
+            otaActive.compareAndSet(ieee, null);
+            server.setFirmwareWithoutNotify(null);
+        }
+        default -> {
+        }
+        }
+
+        OtaStatusListener listener = this.otaStatusListener;
+        if (listener == null) {
+            printOtaStatus(ieee, status, percent);
+            return;
+        }
+        try {
+            listener.onOtaStatus(ieee, status, percent);
+        } catch (Exception e) {
+            System.err.println("OTA status listener threw: " + e);
+        }
+    }
+
+    private void printOtaStatus(IeeeAddress ieee, ZigBeeOtaServerStatus status,
+                                int percent) {
+        double elapsed = (System.nanoTime() - otaStartNanos) / 1e9;
+        switch (status) {
+        case OTA_WAITING -> {
+        }
+        case OTA_TRANSFER_IN_PROGRESS -> {
+            long bytes = (long) otaSize * percent / 100;
+            System.out.printf("OTA %s progress percent=%d bytes=%d size=%d "
+                              + "elapsed=%.0fs rate=%.0fB/s%n", ieee, percent,
+                              bytes, otaSize, elapsed,
+                              elapsed > 0 ? bytes / elapsed : 0);
+        }
+        default -> System.out.printf("OTA %s status state=%s elapsed=%.0fs%n",
+                                     ieee, status, elapsed);
+        }
+    }
+
+    private static int otaKey(int manufacturer, int imageType) {
+        return (manufacturer << 16) | imageType;
     }
 
     // -------------------------------------------------------------------------

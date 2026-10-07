@@ -1,5 +1,15 @@
 import com.zsmartsystems.zigbee.IeeeAddress;
+import com.zsmartsystems.zigbee.app.otaserver.ZigBeeOtaFile;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import zigbee.ZigBeeCoordinator;
 import zigbee.ZigBeeCoordinator.ZigBeeConfig;
 import zigbee.ZigBeePacket;
@@ -7,6 +17,7 @@ import zigbee.ZigBeePacket;
 public class Main {
 
     private static final long TX_PERIOD_MS = 5_000;
+    private static final long OTA_NOTIFY_PERIOD_S = 60;
 
     public static void main(String[] args) throws Exception {
         // By default the smoke test exercises both sides of the radio: it
@@ -63,6 +74,9 @@ public class Main {
             }
         }
 
+        List<ZigBeeOtaFile> otaImages =
+                parsed.otaPath == null ? null : loadOtaImages(parsed.otaPath);
+
         ZigBeeConfig cfg = new ZigBeeConfig.Builder()
                 .serialPort(serialPort)
                 .build();
@@ -85,6 +99,25 @@ public class Main {
         Runtime.getRuntime().addShutdownHook(
                 new Thread(coordinator::stop, "zigbee-shutdown"));
 
+        if (otaImages != null) {
+            coordinator.setOtaImages(otaImages);
+            ScheduledExecutorService otaNotify =
+                    Executors.newSingleThreadScheduledExecutor(r -> {
+                        Thread t = new Thread(r, "zigbee-ota-notify");
+                        t.setDaemon(true);
+                        return t;
+                    });
+            otaNotify.scheduleAtFixedRate(() -> {
+                try {
+                    coordinator.notifyOtaAll();
+                } catch (Exception e) {
+                    System.err.println("OTA notify failed: " + e);
+                }
+            }, OTA_NOTIFY_PERIOD_S, OTA_NOTIFY_PERIOD_S, TimeUnit.SECONDS);
+            System.out.printf("OTA - serving images=%d notify_every=%ds%n",
+                              otaImages.size(), OTA_NOTIFY_PERIOD_S);
+        }
+
         if (transmit) {
             Thread txDemo = new Thread(
                     () -> runTxDemo(coordinator, destAddr),
@@ -94,6 +127,37 @@ public class Main {
         }
 
         Thread.currentThread().join();
+    }
+
+    private static List<ZigBeeOtaFile> loadOtaImages(Path path)
+            throws IOException {
+        List<Path> files;
+        if (Files.isDirectory(path)) {
+            try (Stream<Path> listing = Files.list(path)) {
+                files = listing
+                        .filter(f -> f.getFileName().toString().endsWith(".zigbee"))
+                        .sorted()
+                        .toList();
+            }
+        } else {
+            files = List.of(path);
+        }
+
+        List<ZigBeeOtaFile> images = new ArrayList<>();
+        for (Path file : files) {
+            ZigBeeOtaFile image = new ZigBeeOtaFile(Files.readAllBytes(file));
+            System.out.printf("OTA - image file=%s manufacturer=0x%04X "
+                              + "type=0x%04X version=%08X size=%d%n",
+                              file.getFileName(), image.getManufacturerCode(),
+                              image.getImageType(), image.getFileVersion(),
+                              image.getImageSize());
+            images.add(image);
+        }
+        if (images.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "--ota found no .zigbee images in " + path);
+        }
+        return images;
     }
 
     private static void runTxDemo(ZigBeeCoordinator coordinator,
@@ -137,18 +201,21 @@ public class Main {
         final boolean transmit;
         final String serialPort;
         final IeeeAddress destAddr;
+        final Path otaPath;
 
         private Args(boolean transmit, String serialPort,
-                     IeeeAddress destAddr) {
+                     IeeeAddress destAddr, Path otaPath) {
             this.transmit = transmit;
             this.serialPort = serialPort;
             this.destAddr = destAddr;
+            this.otaPath = otaPath;
         }
 
         static Args parse(String[] args) {
             boolean transmit = true;
             String serialPort = null;
             IeeeAddress destAddr = null;
+            Path otaPath = null;
             for (int i = 0; i < args.length; i++) {
                 String a = args[i].toLowerCase();
                 switch (a) {
@@ -171,12 +238,19 @@ public class Main {
                         }
                         destAddr = parseIeeeAddr(args[++i]);
                         break;
+                    case "--ota":
+                        if (i + 1 >= args.length) {
+                            throw new IllegalArgumentException(
+                                    "--ota requires a .zigbee file or a directory");
+                        }
+                        otaPath = Path.of(args[++i]);
+                        break;
                     default:
                         throw new IllegalArgumentException(
                                 "Unknown argument: " + args[i]);
                 }
             }
-            return new Args(transmit, serialPort, destAddr);
+            return new Args(transmit, serialPort, destAddr, otaPath);
         }
 
         private static IeeeAddress parseIeeeAddr(String s) {
