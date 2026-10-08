@@ -28,7 +28,6 @@ import com.zsmartsystems.zigbee.dongle.ember.ezsp.structure.EzspPolicyId;
 import com.zsmartsystems.zigbee.security.ZigBeeKey;
 import com.zsmartsystems.zigbee.serial.ZigBeeSerialPort;
 import com.zsmartsystems.zigbee.serialization.DefaultDeserializer;
-import com.zsmartsystems.zigbee.serialization.DefaultSerializer;
 import com.zsmartsystems.zigbee.transport.TransportConfig;
 import com.zsmartsystems.zigbee.transport.TransportConfigOption;
 import com.zsmartsystems.zigbee.transport.TrustCentreJoinMode;
@@ -142,7 +141,7 @@ public class ZigBeeCoordinator {
     private static final int OTA_QUERY_JITTER = 100;
     private static final long OTA_TRANSFER_TIMEOUT_MS = 60_000;
     private static final int OTA_BLOCK_FIELD_IEEE = 0x01;
-    private static final int OTA_BLOCK_SIZE = 117;
+    private static final int OTA_BLOCK_SIZE = 217;
 
     public interface OtaStatusListener {
         void onOtaStatus(IeeeAddress ieee, ZigBeeOtaServerStatus status,
@@ -204,7 +203,7 @@ public class ZigBeeCoordinator {
                                    EzspDecisionId.EZSP_ALLOW_JOINS);
 
         manager = new ZigBeeNetworkManager(dongle);
-        manager.setSerializer(DefaultSerializer.class,
+        manager.setSerializer(LargeFrameSerializer.class,
                               DefaultDeserializer.class);
 
         // Stateless data store — nodes are not persisted across restarts.
