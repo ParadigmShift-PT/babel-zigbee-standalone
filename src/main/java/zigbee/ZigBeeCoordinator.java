@@ -122,14 +122,14 @@ public class ZigBeeCoordinator {
 
     /** Maximum on-the-wire size of the OCTET_STRING value (a wrapped
      *  {@code ubabel_packet_t} or fragment frame) carried in the µBabel
-     *  DATA/DISCOVERY custom command. The ZBDongle-E ZCL transport caps the
-     *  value at 128 bytes; subtracting 6 bytes of ZCL framing overhead and
-     *  1 byte for the OCTET_STRING length prefix leaves 121 bytes for the
-     *  raw value (see {@code ZB_MAX_PACKET_SIZE} in {@code ubabel_zb_proto.h}
+     *  DATA/DISCOVERY custom command. The OCTET_STRING length prefix caps the
+     *  value at 254 bytes and {@link LargeFrameSerializer} holds 256; 240
+     *  leaves headroom, and APS fragmentation splits it on air
+     *  (see {@code ZB_MAX_PACKET_SIZE} in {@code zb_stack.h}
      *  on the µBabel side — the firmware enforces the same cap on its
      *  outgoing path). {@link #transmit} enforces this against
      *  {@code packet.getPayload()}. */
-    public static final int MAX_PACKET_SIZE_BYTES = 121;
+    public static final int MAX_PACKET_SIZE_BYTES = 240;
 
     /** Historical payload budget — {@link #MAX_PACKET_SIZE_BYTES} minus the
      *  5 bytes the (now-scrapped) {@code ubabel_zb_packet_t} header once cost.

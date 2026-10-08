@@ -28,8 +28,8 @@ import com.zsmartsystems.zigbee.zcl.protocol.ZclDataType;
  * {@code destProto} envelope + packet body) or a fragment frame —
  * fragmentation/reassembly happens above the driver, in the
  * {@code babel-zigbee-protocol} bridge. Max raw length is
- * {@link ZigBeeCoordinator#MAX_PACKET_SIZE_BYTES} (121 B =
- * {@code ZB_MAX_PACKET_SIZE}; ≤122 B with the prefix).
+ * {@link ZigBeeCoordinator#MAX_PACKET_SIZE_BYTES} (240 B =
+ * {@code ZB_MAX_PACKET_SIZE}; ≤241 B with the prefix).
  *
  * <p>Structured after the zsmartsystems generated command classes so the
  * stack's reflective receive pipeline can instantiate it (the public no-arg
